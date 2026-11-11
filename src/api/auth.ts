@@ -8,6 +8,7 @@ import {
   getMediaFileUrl,
   getOwnedImageUri,
   APPWRITE_DATABASE_ID,
+  PUBLIC_PASSPORT_BASE_URL,
   TEAM_ADMINS,
   TEAM_FIELD_OFFICERS,
   TABLES,
@@ -36,6 +37,17 @@ export const authApi = {
   resolveCurrentUser: async (): Promise<CitizenProfile> => {
     const appwriteUser = await account.get();
     const prefs = (appwriteUser.prefs || {}) as Record<string, any>;
+
+    if (prefs.requireEmailVerification && !appwriteUser.emailVerification) {
+      const verifyUrl = `${PUBLIC_PASSPORT_BASE_URL.replace(/\/+$/, '')}/login.html`;
+      await account
+        .createVerification(verifyUrl)
+        .catch((e) => console.warn('Email verification notice:', e));
+      await account.deleteSession('current').catch(() => {});
+      throw new Error(
+        'Please verify your email address before signing in. A verification link has been sent to your email inbox.'
+      );
+    }
 
     // 1. Check Teams membership
     let isFieldOfficer = false;
@@ -134,6 +146,13 @@ export const authApi = {
   },
 
   /**
+   * Alias matching web `getCurrentAuthoritativeContext` for authoritative session & email verification checks.
+   */
+  getCurrentAuthoritativeContext: async (): Promise<CitizenProfile> => {
+    return authApi.resolveCurrentUser();
+  },
+
+  /**
    * Registers a new Pet Owner or Field Officer account in Appwrite.
    * If `requestedRole === 'officer'`, executes `blockPendingOfficer` and logs out immediately.
    */
@@ -157,9 +176,15 @@ export const authApi = {
     await account.create(ID.unique(), cleanEmail, params.password, cleanName);
     await account.createEmailPasswordSession(cleanEmail, params.password);
 
+    const verifyUrl = `${PUBLIC_PASSPORT_BASE_URL.replace(/\/+$/, '')}/login.html`;
+    await account
+      .createVerification(verifyUrl)
+      .catch((e) => console.warn('Email verification notice:', e));
+
     // 2. Save role & theme prefs
     await account.updatePrefs({
       requestedRole: params.requestedRole,
+      requireEmailVerification: true,
       theme: 'light',
       barangay: canonicalBrgy,
       contactNumber: params.phone.trim(),
@@ -261,9 +286,7 @@ export const authApi = {
         await operate('saveProfileImage', { profileImageId: fileId });
       } else {
         throw new Error(
-          `Image uploaded but could not attach to your account: ${
-            msg || 'Appwrite Function rejected the update'
-          }`
+          msg || 'Unable to update your profile photo. Please try again.'
         );
       }
     }

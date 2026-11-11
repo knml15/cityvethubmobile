@@ -4,7 +4,7 @@ import { useAppPalette, useThemedStyles } from '../../theme';
 import React, { useState, useEffect, useCallback } from 'react';
 import * as ImagePicker from 'expo-image-picker';
 import { Picker } from '@react-native-picker/picker';
-import { useNavigation } from '@react-navigation/native';
+import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import {
   View,
   Text,
@@ -44,6 +44,25 @@ import {
 } from '../../store/types/auth';
 import { PetProfileRow } from '../../store/types/pets';
 
+const COAT_COLORS = [
+  'Black',
+  'White',
+  'Brown',
+  'Cream',
+  'Gray',
+  'Orange',
+  'Golden',
+  'Tan',
+  'Ginger',
+  'Calico',
+  'Tortoiseshell',
+  'Tabby',
+  'Brindle',
+  'Spotted',
+  'Mixed',
+  'Other / Unknown',
+] as const;
+
 export interface RegisteredPet {
   id: string;
   petProfileId: string;
@@ -76,6 +95,9 @@ export interface RegisteredPet {
   photoUrl?: string;
   vitalStatus?: 'Alive' | 'Deceased' | 'Missing';
   ancestryParentId?: string;
+  ancestryParentName?: string;
+  ancestryParent2Id?: string;
+  ancestryParent2Name?: string;
 }
 
 export default function UserProfileScreen() {
@@ -137,6 +159,7 @@ export default function UserProfileScreen() {
     'Alive' | 'Deceased' | 'Missing'
   >('Alive');
   const [newPetParentId, setNewPetParentId] = useState('');
+  const [newPetParent2Id, setNewPetParent2Id] = useState('');
   const [newPetBarangay, setNewPetBarangay] = useState<IliganBarangay>(
     normalizeBarangay(user?.barangay)
   );
@@ -230,6 +253,9 @@ export default function UserProfileScreen() {
           photoFileId: doc.photoFileId,
           vitalStatus: doc.vitalStatus || 'Alive',
           ancestryParentId: doc.ancestryParentId || '',
+          ancestryParentName: doc.ancestryParentName || '',
+          ancestryParent2Id: doc.ancestryParent2Id || '',
+          ancestryParent2Name: doc.ancestryParent2Name || '',
           photoUrl: getMediaFileUrl(doc.photoFileId),
         };
       });
@@ -263,9 +289,11 @@ export default function UserProfileScreen() {
     fetchIncomingApplications,
   ]);
 
-  useEffect(() => {
-    fetchProfileData();
-  }, [fetchProfileData]);
+  useFocusEffect(
+    useCallback(() => {
+      fetchProfileData();
+    }, [fetchProfileData])
+  );
 
   const handleCreateInventoryPet = async () => {
     if (!newPetName.trim() || !newPetBreed.trim() || !newPetAge.trim()) {
@@ -292,6 +320,19 @@ export default function UserProfileScreen() {
         photoFileId = await uploadMediaFile(petImageAsset);
       }
 
+      if (
+        newPetParentId &&
+        newPetParent2Id &&
+        newPetParentId === newPetParent2Id
+      ) {
+        Alert.alert(
+          'Invalid Ancestry',
+          'Sire (Parent 1) and Dam (Parent 2) cannot be the same pet.'
+        );
+        setIsSubmittingPet(false);
+        return;
+      }
+
       await operate('createInventoryPet', {
         petName: newPetName.trim(),
         species: newPetSpecies,
@@ -303,6 +344,7 @@ export default function UserProfileScreen() {
         photoFileId,
         vitalStatus: newPetVitalStatus,
         ancestryParentId: newPetParentId,
+        ancestryParent2Id: newPetParent2Id,
         profileTitle: newPetTitle.trim() || `${newPetName.trim()}'s Passport`,
         profileDescription: newPetDescription.trim(),
         homeAddress: newPetHomeAddress.trim(),
@@ -321,6 +363,7 @@ export default function UserProfileScreen() {
       setNewPetAge('');
       setNewPetVitalStatus('Alive');
       setNewPetParentId('');
+      setNewPetParent2Id('');
       setNewPetTitle('');
       setNewPetDescription('');
       setNewPetLostFoundMsg('');
@@ -328,13 +371,13 @@ export default function UserProfileScreen() {
 
       await fetchProfileData();
       Alert.alert(
-        'Pet Added to Inventory',
-        'Your pet profile and instant QR Passport have been created! Tap your pet card to view the QR code, upload health documents, or request official CVO verification.'
+        'Saved successfully',
+        'Your pet profile and QR Passport have been created! Tap your pet card to view the QR code, upload health documents, or request official CVO verification.'
       );
     } catch (error: any) {
       Alert.alert(
         'Failed to Add Pet',
-        error?.message || 'Could not create pet profile in Appwrite.'
+        error?.message || 'Could not save pet profile. Please try again.'
       );
     } finally {
       setIsSubmittingPet(false);
@@ -357,7 +400,7 @@ export default function UserProfileScreen() {
       await authApi.setProfilePhotoSharing(shareAvatarOnListings);
       await refreshSession();
       setIsEditProfileVisible(false);
-      Alert.alert('Profile Saved', 'Your profile details have been updated.');
+      Alert.alert('Saved successfully', 'Your profile details have been updated.');
     } catch (error: any) {
       Alert.alert('Update Failed', error?.message || 'Could not save profile.');
     } finally {
@@ -371,7 +414,7 @@ export default function UserProfileScreen() {
         setIsLoadingData(true);
         await authApi.uploadAndSaveAvatar(asset);
         await refreshSession();
-        Alert.alert('Avatar Updated', 'Your profile picture has been saved.');
+        Alert.alert('Saved successfully', 'Your profile picture has been saved.');
       } catch (error: any) {
         Alert.alert(
           'Avatar Upload Failed',
@@ -492,7 +535,7 @@ export default function UserProfileScreen() {
               await fetchProfileData();
               Alert.alert(
                 'Ownership Transferred',
-                `Pet ownership has been transferred to ${applicantName} and recorded in ownership_history.`
+                `Pet ownership has been transferred to ${applicantName}.`
               );
             } catch (err: any) {
               Alert.alert(
@@ -720,9 +763,9 @@ export default function UserProfileScreen() {
                         styles.statusBadge,
                         pet.verificationStatus === 'verified'
                           ? styles.badgeRegistered
-                          : pet.verificationStatus === 'pending'
-                          ? styles.badgePending
-                          : styles.badgeDraft,
+                          : pet.verificationStatus === 'rejected'
+                          ? styles.badgeDraft
+                          : styles.badgePending,
                       ]}
                     >
                       <Text
@@ -730,14 +773,16 @@ export default function UserProfileScreen() {
                           styles.badgeText,
                           pet.verificationStatus === 'verified'
                             ? styles.badgeTextReg
-                            : pet.verificationStatus === 'pending'
-                            ? styles.badgeTextPending
-                            : styles.badgeTextDraft,
+                            : pet.verificationStatus === 'rejected'
+                            ? styles.badgeTextDraft
+                            : styles.badgeTextPending,
                         ]}
                       >
                         {pet.verificationStatus === 'verified'
                           ? `CVO ID: ${pet.officialRegistryId || 'VERIFIED'}`
-                          : pet.verificationStatus.toUpperCase()}
+                          : pet.verificationStatus === 'rejected'
+                          ? 'Verification Rejected'
+                          : 'Pending Verification'}
                       </Text>
                     </View>
                   </View>
@@ -991,7 +1036,7 @@ export default function UserProfileScreen() {
                   >
                     {idCategories.length === 0 ? (
                       <Picker.Item
-                        label="No active ID categories configured on web"
+                        label="No active ID categories available"
                         value=""
                       />
                     ) : (
@@ -1080,6 +1125,8 @@ export default function UserProfileScreen() {
                     onPress={() => {
                       setNewPetSpecies(sp);
                       setNewPetBreed('');
+                      setNewPetParentId('');
+                      setNewPetParent2Id('');
                     }}
                   >
                     <Text
@@ -1133,15 +1180,24 @@ export default function UserProfileScreen() {
                 onChange={setNewPetBreed}
               />
 
-              <Text style={styles.fieldLabel}>Coat color (optional)</Text>
-              <TextInput
-                style={styles.textInput}
-                value={newPetColor}
-                onChangeText={setNewPetColor}
-                placeholder="e.g. Brown, white, tabby"
-                placeholderTextColor="#94A3B8"
-                maxLength={50}
-              />
+              <Text style={styles.fieldLabel}>Coat Color</Text>
+              <View style={styles.pickerBox}>
+                <Picker
+                  selectedValue={newPetColor}
+                  onValueChange={(v) => setNewPetColor(String(v))}
+                  style={{ color: colors.text, width: '100%' }}
+                  dropdownIconColor={colors.text}
+                >
+                  <Picker.Item label="Select coat color" value="" />
+                  {COAT_COLORS.map((colorOption) => (
+                    <Picker.Item
+                      key={colorOption}
+                      label={colorOption}
+                      value={colorOption}
+                    />
+                  ))}
+                </Picker>
+              </View>
 
               <Text style={styles.fieldLabel}>Age in Years (0–40) *</Text>
               <TextInput
@@ -1168,18 +1224,63 @@ export default function UserProfileScreen() {
               </View>
 
               <Text style={styles.fieldLabel}>
-                Parent pet (optional ancestry)
+                Sire / Parent 1 (Male — same species)
               </Text>
               <View style={styles.pickerBox}>
                 <Picker
                   selectedValue={newPetParentId}
-                  onValueChange={setNewPetParentId}
+                  onValueChange={(v) => {
+                    const val = String(v);
+                    setNewPetParentId(val);
+                    if (val && val === newPetParent2Id) {
+                      setNewPetParent2Id('');
+                    }
+                  }}
                   style={{ color: colors.text, width: '100%' }}
                   dropdownIconColor={colors.text}
                 >
                   <Picker.Item label="Unknown / not in inventory" value="" />
                   {myPets
-                    .filter((parent) => parent.species === newPetSpecies)
+                    .filter(
+                      (parent) =>
+                        parent.species === newPetSpecies &&
+                        parent.sex === 'Male' &&
+                        parent.petProfileId !== newPetParent2Id
+                    )
+                    .map((parent) => (
+                      <Picker.Item
+                        key={parent.petProfileId}
+                        label={`${parent.name} · ${parent.breed}`}
+                        value={parent.petProfileId}
+                      />
+                    ))}
+                </Picker>
+              </View>
+
+              <Text style={styles.fieldLabel}>
+                Dam / Parent 2 (Female — same species)
+              </Text>
+              <View style={styles.pickerBox}>
+                <Picker
+                  selectedValue={newPetParent2Id}
+                  onValueChange={(v) => {
+                    const val = String(v);
+                    setNewPetParent2Id(val);
+                    if (val && val === newPetParentId) {
+                      setNewPetParentId('');
+                    }
+                  }}
+                  style={{ color: colors.text, width: '100%' }}
+                  dropdownIconColor={colors.text}
+                >
+                  <Picker.Item label="Unknown / not in inventory" value="" />
+                  {myPets
+                    .filter(
+                      (parent) =>
+                        parent.species === newPetSpecies &&
+                        parent.sex === 'Female' &&
+                        parent.petProfileId !== newPetParentId
+                    )
                     .map((parent) => (
                       <Picker.Item
                         key={parent.petProfileId}
@@ -1204,7 +1305,7 @@ export default function UserProfileScreen() {
                 </Picker>
               </View>
 
-              <Text style={styles.fieldLabel}>Passport Headline / Title</Text>
+              <Text style={styles.fieldLabel}>Pet Description</Text>
               <TextInput
                 style={styles.textInput}
                 placeholder="Friendly Aspin in Hinaplanon"
@@ -1389,7 +1490,7 @@ export default function UserProfileScreen() {
             <Text style={styles.qrSubtitle}>
               {selectedPetForQR?.verificationStatus === 'verified'
                 ? `✓ CVO Verified (${selectedPetForQR.officialRegistryId})`
-                : 'Personal QR Passport (Owner Consented Fields)'}
+                : 'Pending Verification • Personal QR Passport'}
             </Text>
 
             {selectedPetForQR && (

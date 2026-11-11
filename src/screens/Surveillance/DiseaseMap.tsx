@@ -278,7 +278,7 @@ export default function DiseaseMap() {
           </Text>
 
           <Text style={styles.label}>
-            Incident Category (Admin-Defined Active Categories) *
+            Incident Category *
           </Text>
           <View style={styles.pickerBox}>
             <Picker

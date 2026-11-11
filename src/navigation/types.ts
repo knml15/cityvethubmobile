@@ -5,8 +5,17 @@ import { PetPassport } from '../store/types/pets';
 export type MainTabParamList = {
   AdoptionFeed: undefined;
   SurveillanceMap: undefined;
-  Community: undefined;
+  Community: { channelId?: string; postId?: string; tab?: 'feed' | 'channels' | 'notices' } | undefined;
   UserProfile: undefined;
+  Settings: undefined;
+};
+
+// Field Officer Tab Routes (Community replaces AdoptionFeed)
+export type OfficerTabParamList = {
+  FieldLookup: undefined;
+  FieldIncidents: undefined;
+  OcularQueue: undefined;
+  Community: { channelId?: string; postId?: string; tab?: 'feed' | 'channels' | 'notices' } | undefined;
   Settings: undefined;
 };
 
@@ -15,7 +24,7 @@ export type RootStackParamList = {
   Login: undefined;
   Register: undefined;
   MainApp: NavigatorScreenParams<MainTabParamList> | undefined;
-  OfficerApp: undefined;
+  OfficerApp: NavigatorScreenParams<OfficerTabParamList> | undefined;
   PetDetail: { pet: PetPassport | any; isOwned?: boolean };
   ApplyAdoption: { petId: string | number };
   ReportIncident: undefined;

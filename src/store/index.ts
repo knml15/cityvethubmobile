@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { Alert } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 import { Query } from 'react-native-appwrite';
 import {
@@ -12,6 +13,7 @@ import {
 import { authApi } from '../api/auth';
 import { adoptionApi } from '../api/adoption';
 import { diseaseApi } from '../api/disease';
+import { registerDevicePushTarget } from '../utils/pushNotifications';
 import { CitizenProfile } from './types/auth';
 import { AdoptionState, AdoptionApplication } from './types/adoption';
 import {
@@ -96,6 +98,8 @@ export const useAuthStore = create<AuthStoreState>((set) => ({
         user: profile,
         isLoading: false,
       });
+
+      registerDevicePushTarget(profile.id).catch(() => {});
     } catch (error: any) {
       set({ isLoading: false });
       const rawMsg = String(error?.message || '');
@@ -104,12 +108,14 @@ export const useAuthStore = create<AuthStoreState>((set) => ({
         rawMsg.toLowerCase().includes('user_blocked') ||
         rawMsg.toLowerCase().includes('awaiting cvo approval')
       ) {
-        alert(
-          'Awaiting CVO Approval: Your Field Officer account is currently disabled until a CVO Administrator approves your membership in cityvethub-field-officers.'
+        Alert.alert(
+          'Awaiting CVO Approval',
+          'Your Field Officer account is pending verification by a CVO Administrator.'
         );
       } else {
-        alert(
-          rawMsg || 'Login failed. Please check your email and password.'
+        Alert.alert(
+          'Sign In Failed',
+          rawMsg || 'Unable to sign in. Please check your email and password.'
         );
       }
     }
@@ -150,6 +156,8 @@ export const useAuthStore = create<AuthStoreState>((set) => ({
         isAuthenticated: true,
         isRestoring: false,
       });
+
+      registerDevicePushTarget(profile.id).catch(() => {});
     } catch {
       await SecureStore.deleteItemAsync('auth_token').catch(() => {});
       set({

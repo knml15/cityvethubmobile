@@ -63,7 +63,7 @@ export default function RegisterScreen({ navigation }: any) {
     if (password.length < 12) {
       Alert.alert(
         'Password Policy',
-        'For account security, your password must be at least 12 characters long (matching the CityVetHub web requirement).'
+        'For account security, your password must be at least 12 characters long.'
       );
       return;
     }
@@ -99,13 +99,13 @@ export default function RegisterScreen({ navigation }: any) {
       if (result.pendingOfficer) {
         Alert.alert(
           'Awaiting CVO Approval',
-          'Your Field Officer account has been registered and placed in the pending approval queue (`blockPendingOfficer`).\n\nYou will be able to sign in once a CVO Administrator approves your membership on the Web Dashboard.',
+          'Your Field Officer account has been submitted for verification.\n\nYou will be able to sign in once a CVO Administrator approves your account.',
           [{ text: 'Back to Login', onPress: () => navigation.navigate('Login') }]
         );
       } else {
         Alert.alert(
           'Registration Complete',
-          'Your Pet Owner account has been created. Please sign in.',
+          'Your Pet Owner account has been created and a verification link has been sent to your email address. Please sign in.',
           [{ text: 'Sign In', onPress: () => navigation.navigate('Login') }]
         );
       }

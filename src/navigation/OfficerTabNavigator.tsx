@@ -1,16 +1,18 @@
 import React from 'react';
-import { Text } from 'react-native';
+import { Text, View } from 'react-native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAppPalette } from '../theme';
 import SettingsScreen from '../screens/Profile/SettingsScreen';
+import NotificationBell from '../components/NotificationBell';
 
 import FieldLookupScreen from '../screens/Officer/FieldLookupScreen';
 import FieldIncidentScreen from '../screens/Officer/FieldIncidentScreen';
 import OcularQueueScreen from '../screens/Officer/OcularQueueScreen';
-import AdoptionFeed from '../screens/Adoption/AdoptionFeed';
+import CommunityScreen from '../screens/Community/CommunityScreen';
+import { OfficerTabParamList } from './types';
 
-const Tab = createBottomTabNavigator();
+const Tab = createBottomTabNavigator<OfficerTabParamList>();
 
 export default function OfficerTabNavigator() {
   const insets = useSafeAreaInsets();
@@ -24,6 +26,11 @@ export default function OfficerTabNavigator() {
         headerTitleStyle: { color: colors.text, fontWeight: '700' },
         headerStyle: { backgroundColor: colors.surface },
         headerTintColor: colors.text,
+        headerRight: () => (
+          <View style={{ marginRight: 8 }}>
+            <NotificationBell />
+          </View>
+        ),
         tabBarActiveTintColor: colors.primary,
         tabBarInactiveTintColor: colors.secondary,
         tabBarStyle: {
@@ -73,13 +80,13 @@ export default function OfficerTabNavigator() {
         }}
       />
       <Tab.Screen
-        name="OfficerAdoptions"
-        component={AdoptionFeed}
+        name="Community"
+        component={CommunityScreen}
         options={{
-          title: 'Adoptions Directory (Read-Only)',
-          tabBarLabel: 'Adoptions',
+          title: 'Community & CVO Notices',
+          tabBarLabel: 'Community',
           tabBarIcon: ({ color }) => (
-            <Text style={{ color, fontSize: 17 }}>🐾</Text>
+            <Text style={{ color, fontSize: 17 }}>💬</Text>
           ),
         }}
       />

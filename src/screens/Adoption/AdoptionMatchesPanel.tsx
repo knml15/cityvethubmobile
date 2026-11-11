@@ -53,7 +53,7 @@ export default function AdoptionMatchesPanel({visible,onClose,onOpenListing}:{
       const updated={...prefs,minAgeYears:min,maxAgeYears:max};
       await saveMatchPreferences(updated);
       setPrefs(updated);
-      Alert.alert('Preferences saved','New matching adoption listings will create private in-app notifications. Existing listings are not backfilled.');
+      Alert.alert('Saved successfully','New matching adoption listings will create in-app notifications.');
     }catch(e:any){Alert.alert('Unable to save',e?.message||'Check your input and retry.');}
     finally{setBusy(false);}
   };
@@ -100,17 +100,19 @@ export default function AdoptionMatchesPanel({visible,onClose,onOpenListing}:{
           <Text style={{color:colors.text,fontWeight:'700',flex:1}}>Request push notifications</Text>
           <Switch value={prefs.pushEnabled} onValueChange={v=>setPreference('pushEnabled',v)}/>
         </View>
-        <Text style={{color:colors.secondary,fontSize:11,marginBottom:15}}>In-app alerts work independently. Android push additionally requires an installed development build, notification permissions, and an Appwrite Messaging provider/registered device target.</Text>
-        <TouchableOpacity accessibilityRole="button" disabled={busy||loading} onPress={save} style={{backgroundColor:colors.primary,borderRadius:12,padding:14,alignItems:'center',marginBottom:22,opacity:busy?.6:1}}>
+        <Text style={{color:colors.secondary,fontSize:11,marginBottom:15}}>In-app alerts work automatically. Enable push notifications to receive alerts on your device when new matching pets are listed.</Text>
+        <TouchableOpacity accessibilityRole="button" disabled={busy||loading} onPress={save} style={{backgroundColor:colors.primary,borderRadius:12,padding:14,alignItems:'center',marginBottom:16,opacity:busy?.6:1}}>
           <Text style={{color:'#FFFFFF',fontWeight:'800'}}>{busy?'Saving...':'Save my preferences'}</Text>
         </TouchableOpacity>
-        <Text style={{color:colors.text,fontSize:19,fontWeight:'800',marginBottom:10}}>My match notifications ({notifications.filter(n=>!n.isRead).length} unread)</Text>
-        {!notifications.length && !loading && <Text style={{color:colors.secondary,marginBottom:12}}>No matching adoption alerts yet.</Text>}
-        {notifications.map(note=><TouchableOpacity key={note.$id} accessibilityRole="button" onPress={()=>openNote(note)} style={[box,{borderLeftWidth:4,borderLeftColor:note.isRead?colors.border:colors.primary}]}>
-          <Text style={{color:colors.text,fontSize:14,fontWeight:note.isRead?'500':'800'}}>{note.title||note.petName||'Matching pet'}</Text>
-          <Text style={{color:colors.secondary,fontSize:12,marginTop:5}}>{new Date(note.createdAt||Date.now()).toLocaleString()} · {note.isRead?'Read':'New'}</Text>
-          <Text style={{color:colors.primary,fontSize:12,marginTop:6}}>Open matching adoption listing ›</Text>
-        </TouchableOpacity>)}
+        {/* Centralized notification delivery integration (readMatchNotification handled via Global Notification Center) */}
+        <View style={[box, {marginTop: 4, backgroundColor: colors.surface}]}>
+          <Text style={{color: colors.text, fontSize: 14, fontWeight: '800', marginBottom: 4}}>
+            🔔 My match notifications
+          </Text>
+          <Text style={{color: colors.secondary, fontSize: 12, lineHeight: 18}}>
+            Matching pet alerts are now delivered directly to your Global Notification Center (🔔) at the top right of your screen. You will receive an instant alert whenever a pet matching your saved criteria is listed.
+          </Text>
+        </View>
       </ScrollView>
     </View>
   </Modal>;

@@ -155,7 +155,7 @@ export default function SettingsScreen() {
         await authApi.setProfilePhotoSharing(shareAvatarOnListings);
       }
       await refreshSession();
-      Alert.alert('Saved', 'Your account information was updated.');
+      Alert.alert('Saved successfully', 'Your account information was updated.');
     } catch (e: any) {
       Alert.alert('Profile update failed', e?.message || 'Try again.');
     } finally {
@@ -178,8 +178,8 @@ export default function SettingsScreen() {
       setLocalAvatar(asset.uri);
       await refreshSession();
       Alert.alert(
-        'Profile photo updated',
-        'Your uploaded photo has been saved to Appwrite.'
+        'Saved successfully',
+        'Your profile photo has been updated.'
       );
     } catch (e: any) {
       Alert.alert(
@@ -231,8 +231,8 @@ export default function SettingsScreen() {
       setSecurityValue('');
       setSecurityConfirm('');
       Alert.alert(
-        'Account updated',
-        'Your security information has been changed.'
+        'Saved successfully',
+        'Your security information has been updated.'
       );
     } catch (e: any) {
       Alert.alert(
@@ -463,7 +463,7 @@ export default function SettingsScreen() {
 
         <Panel
           title="Appearance"
-          hint="Your selected theme is saved to your Appwrite account and follows you between sessions."
+          hint="Your selected theme is saved to your account and follows you between sessions."
           colors={colors}
         >
           <View style={{ flexDirection: 'row', gap: 10 }}>
@@ -499,7 +499,7 @@ export default function SettingsScreen() {
 
         <Panel
           title="Security & session"
-          hint="Change your password securely from the account service. Never share a session or server API key."
+          hint="Manage your account password and email address. Never share your password with anyone."
           colors={colors}
         >
           <Text style={{ color: colors.secondary, marginBottom: 6 }}>

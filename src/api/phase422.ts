@@ -45,7 +45,7 @@ export async function requirePhase422Backend() {
     const precedingSame = required.slice(0, i).every((part, j) => digits[j] === part);
     return precedingSame && (digits[i] || 0) < minimum;
   });
-  if (older) throw new Error(`CityVetHub backend ${build} is outdated. Deploy and activate Phase 4.22.0 or newer before using this feature.`);
+  if (older) throw new Error('This feature is temporarily unavailable. Please try again shortly.');
   return build;
 }
 export const defaultMatchPreferences: PetMatchPreference = {
@@ -79,7 +79,25 @@ export async function getMatchNotifications(): Promise<PetMatchNotification[]> {
     if(docs.length<100)break;
     cursor=docs[docs.length-1].$id;
   }
-  return rows.sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||'')));
+
+  // Cross-reference against active adoption listings to prevent ghost alerts for unlisted/deactivated pets
+  try {
+    const activeRes = await databases.listDocuments(
+      APPWRITE_DATABASE_ID,
+      TABLES.ADOPTION_LISTINGS,
+      [Query.equal('isActive', true), Query.limit(100)]
+    );
+    const activeListingIds = new Set(
+      activeRes.documents
+        .filter((d: any) => String(d.status || '').toLowerCase() !== 'adopted')
+        .map((d: any) => String(d.$id))
+    );
+    return rows
+      .filter((row) => activeListingIds.has(String(row.listingId)))
+      .sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||'')));
+  } catch {
+    return rows.sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||'')));
+  }
 }
 export async function readMatchNotification(notificationId: string) {
   if (!notificationId) throw new Error('Notification ID is required.');

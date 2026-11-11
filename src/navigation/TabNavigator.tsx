@@ -1,17 +1,19 @@
 import React from 'react';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
-import { Text } from 'react-native';
+import { Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAppPalette } from '../theme';
 import SettingsScreen from '../screens/Profile/SettingsScreen';
+import NotificationBell from '../components/NotificationBell';
 
 // Pet Owner Screens
 import AdoptionFeed from '../screens/Adoption/AdoptionFeed';
 import DiseaseMap from '../screens/Surveillance/DiseaseMap';
 import CommunityScreen from '../screens/Community/CommunityScreen';
 import UserProfileScreen from '../screens/Profile/UserProfileScreen';
+import { MainTabParamList } from './types';
 
-const Tab = createBottomTabNavigator();
+const Tab = createBottomTabNavigator<MainTabParamList>();
 
 export default function TabNavigator() {
   const insets = useSafeAreaInsets();
@@ -29,6 +31,11 @@ export default function TabNavigator() {
         headerTitleStyle: {
           fontWeight: 'bold',
         },
+        headerRight: () => (
+          <View style={{ marginRight: 8 }}>
+            <NotificationBell />
+          </View>
+        ),
         tabBarActiveTintColor: colors.primary,
         tabBarInactiveTintColor: colors.secondary,
         tabBarStyle: {

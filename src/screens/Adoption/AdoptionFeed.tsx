@@ -17,7 +17,7 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { Picker } from '@react-native-picker/picker';
-import { useNavigation } from '@react-navigation/native';
+import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import { Query } from 'react-native-appwrite';
 import { useAdoptionStore, useAuthStore } from '../../store/index';
 import {
@@ -97,9 +97,11 @@ export default function AdoptionFeed() {
     }
   }, [user, availablePets]);
 
-  useEffect(() => {
-    fetchAvailablePets();
-  }, [fetchAvailablePets]);
+  useFocusEffect(
+    useCallback(() => {
+      fetchAvailablePets();
+    }, [fetchAvailablePets])
+  );
 
   const onRefresh = async () => {
     setRefreshing(true);
@@ -169,7 +171,7 @@ export default function AdoptionFeed() {
       setIsListModalVisible(false);
       setListingDescription('');
       Alert.alert(
-        'Listing Published!',
+        'Listed successfully',
         'Your pet is now visible on the Adoption Feed.'
       );
     } catch (error: any) {
@@ -335,18 +337,55 @@ export default function AdoptionFeed() {
 
   return (
     <View style={styles.container}>
-      {user?.contractRole !== 'officer' && <>
-        <TouchableOpacity accessibilityRole="button" onPress={()=>setMatchesVisible(true)}
-          style={{marginHorizontal:15,marginTop:10,marginBottom:6,padding:13,borderRadius:13,backgroundColor:'#DCFCE7',borderColor:'#86EFAC',borderWidth:1}}>
-          <Text style={{color:'#166534',fontSize:14,fontWeight:'800'}}>🔔 Match preferences & adoption alerts</Text>
-        </TouchableOpacity>
-        <AdoptionMatchesPanel visible={matchesVisible} onClose={()=>setMatchesVisible(false)} onOpenListing={async(listingId)=>{
-          setMatchesVisible(false);
-          const match=availablePets.find(item=>String(item.listingId||item.id)===listingId);
-          if(!match){Alert.alert('Listing unavailable','This pet listing is no longer active, or you need to refresh the adoption feed.');return;}
-          openPetDetail(match);
-        }}/>
-      </>}
+      {user?.contractRole !== 'officer' && (
+        <>
+          <TouchableOpacity
+            accessibilityRole="button"
+            onPress={() => setMatchesVisible(true)}
+            activeOpacity={0.8}
+            style={styles.matchingPreferencesCard}
+          >
+            <View style={styles.matchingIconBadge}>
+              <Text style={{ fontSize: 18 }}>🎯</Text>
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.matchingCardTitle}>
+                Pet Matching Preferences
+              </Text>
+              <Text style={styles.matchingCardSub}>
+                Set species, breed & age criteria for instant alerts
+              </Text>
+            </View>
+            <Text style={styles.matchingChevron}>›</Text>
+          </TouchableOpacity>
+          <AdoptionMatchesPanel
+            visible={matchesVisible}
+            onClose={() => setMatchesVisible(false)}
+            onOpenListing={async (listingId) => {
+              setMatchesVisible(false);
+              let match = availablePets.find(
+                (item) => String(item.listingId || item.id) === listingId
+              );
+              if (!match) {
+                await fetchAvailablePets();
+                match = useAdoptionStore
+                  .getState()
+                  .availablePets.find(
+                    (item) => String(item.listingId || item.id) === listingId
+                  );
+              }
+              if (!match) {
+                Alert.alert(
+                  'Listing unavailable',
+                  'This pet listing is no longer active, or you need to refresh the adoption feed.'
+                );
+                return;
+              }
+              openPetDetail(match);
+            }}
+          />
+        </>
+      )}
       {/* Top Search & "+ List My Pet" Button */}
       <View style={styles.searchRow}>
         <TextInput
@@ -609,6 +648,48 @@ export default function AdoptionFeed() {
 
 const baseStyles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#F8FAFC' },
+  matchingPreferencesCard: {
+    marginHorizontal: 15,
+    marginTop: 10,
+    marginBottom: 8,
+    padding: 12,
+    borderRadius: 14,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 2,
+    elevation: 1,
+  },
+  matchingIconBadge: {
+    width: 38,
+    height: 38,
+    borderRadius: 10,
+    backgroundColor: '#EFF6FF',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  matchingCardTitle: {
+    color: '#0F172A',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  matchingCardSub: {
+    color: '#64748B',
+    fontSize: 11,
+    marginTop: 2,
+  },
+  matchingChevron: {
+    fontSize: 22,
+    color: '#94A3B8',
+    fontWeight: '600',
+    paddingRight: 4,
+  },
   searchRow: {
     flexDirection: 'row',
     paddingHorizontal: 16,

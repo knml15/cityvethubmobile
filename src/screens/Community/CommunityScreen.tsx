@@ -1,5 +1,6 @@
-import { useThemedStyles } from '../../theme';
-import React, { useState, useEffect, useCallback } from 'react';
+import { useAppPalette, useThemedStyles } from '../../theme';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { useFocusEffect, useRoute } from '@react-navigation/native';
 import * as ImagePicker from 'expo-image-picker';
 import {
   View,
@@ -147,10 +148,77 @@ function SignedCommunityImage({
   );
 }
 
+/** Checks whether a post or comment author is a Field Officer or CVO staff member */
+function isOfficialStaffAuthor(
+  item: {
+    authorId?: string;
+    authorName?: string;
+    authorRole?: string;
+    accountType?: string;
+    role?: string;
+    isOfficial?: boolean;
+  },
+  currentUserId?: string,
+  currentUserIsOfficer?: boolean
+): boolean {
+  if (item.isOfficial) return true;
+  const roleCandidates = [
+    item.authorRole,
+    item.accountType,
+    item.role,
+    (item as any).authorAccountType,
+    (item as any).contractRole,
+    (item as any).userRole,
+  ];
+  for (const candidate of roleCandidates) {
+    if (
+      typeof candidate === 'string' &&
+      /^(officer|field_officer|staff|admin|cvo|vet_officer|cvo_admin)$/i.test(
+        candidate.trim()
+      )
+    ) {
+      return true;
+    }
+  }
+  if (
+    currentUserIsOfficer &&
+    currentUserId &&
+    item.authorId &&
+    String(item.authorId) === String(currentUserId)
+  ) {
+    return true;
+  }
+  if (
+    typeof item.authorName === 'string' &&
+    /\b(cvo|field officer|vet officer)\b/i.test(item.authorName)
+  ) {
+    return true;
+  }
+  return false;
+}
+
 export default function CommunityScreen() {
   const styles = useThemedStyles(baseStyles);
+  const colors = useAppPalette();
+  const route = useRoute<any>();
   const { user } = useAuthStore();
-  const isVerifiedOwner = user?.accountVerificationStatus === 'verified';
+  const [overviewRole, setOverviewRole] = useState<
+    'owner' | 'officer' | 'admin' | null
+  >(null);
+  const [overviewVerified, setOverviewVerified] = useState(false);
+
+  const isOfficer =
+    user?.contractRole === 'officer' ||
+    user?.role === 'VET_OFFICER' ||
+    user?.role === 'CVO_ADMIN' ||
+    overviewRole === 'officer' ||
+    overviewRole === 'admin';
+
+  const isVerifiedOwner =
+    isOfficer ||
+    user?.accountVerificationStatus === 'verified' ||
+    Boolean(user?.isVerified) ||
+    overviewVerified;
 
   const [activeTab, setActiveTab] = useState<'feed' | 'channels' | 'notices'>(
     'feed'
@@ -162,6 +230,8 @@ export default function CommunityScreen() {
   const [notices, setNotices] = useState<CommunityNotice[]>([]);
   const [selectedChannel, setSelectedChannel] =
     useState<CommunityChannel | null>(null);
+  const selectedChannelRef = useRef<CommunityChannel | null>(null);
+  selectedChannelRef.current = selectedChannel;
   const [channelPosts, setChannelPosts] = useState<CommunityPost[]>([]);
 
   // Search state (`communitySearch`)
@@ -178,6 +248,9 @@ export default function CommunityScreen() {
 
   // Create Post Modal (`communityCreatePost` with <= 4 private images)
   const [isCreatePostVisible, setIsCreatePostVisible] = useState(false);
+  const [postKind, setPostKind] = useState<'discussion' | 'announcement'>(
+    'discussion'
+  );
   const [postTitle, setPostTitle] = useState('');
   const [postBody, setPostBody] = useState('');
   const [postImages, setPostImages] = useState<ImagePicker.ImagePickerAsset[]>(
@@ -201,27 +274,33 @@ export default function CommunityScreen() {
     return rawPosts.map((p) => ({
       ...p,
       id: String(p.id || p.$id || ''),
+      authorRole: p.authorRole || p.role || p.accountType || undefined,
+      accountType: p.accountType || p.authorRole || p.role || undefined,
+      isOfficial: Boolean(p.isOfficial),
       imageFileIds: parseImageFileIds(p.imageFileIds),
     }));
   };
 
-  const loadChannelPosts = useCallback(async (channel: CommunityChannel) => {
-    setSelectedChannel(channel);
-    if (!channel.canRead && channel.privacy === 'private') {
-      setChannelPosts([]);
-      return;
-    }
-    try {
-      const res = await operate<{
-        channel?: CommunityChannel;
-        posts?: CommunityPost[];
-      }>('communityChannel', { channelId: channel.id });
-      setChannelPosts(normalizePosts(res?.posts || []));
-    } catch (error) {
-      console.warn('communityChannel warning:', error);
-      setChannelPosts([]);
-    }
-  }, []);
+  const loadChannelPosts = useCallback(
+    async (channel: CommunityChannel) => {
+      setSelectedChannel(channel);
+      if (!channel.canRead && channel.privacy === 'private' && !isOfficer) {
+        setChannelPosts([]);
+        return;
+      }
+      try {
+        const res = await operate<{
+          channel?: CommunityChannel;
+          posts?: CommunityPost[];
+        }>('communityChannel', { channelId: channel.id });
+        setChannelPosts(normalizePosts(res?.posts || []));
+      } catch (error) {
+        console.warn('communityChannel warning:', error);
+        setChannelPosts([]);
+      }
+    },
+    [isOfficer]
+  );
 
   const fetchCommunityData = useCallback(async () => {
     setIsLoading(true);
@@ -233,6 +312,13 @@ export default function CommunityScreen() {
           {}
         ).catch(() => ({ notices: [] })),
       ]);
+
+      if (overviewRes?.role) {
+        setOverviewRole(overviewRes.role);
+      }
+      if (typeof overviewRes?.verified === 'boolean') {
+        setOverviewVerified(overviewRes.verified);
+      }
 
       const fetchedChannels = Array.isArray(overviewRes?.channels)
         ? overviewRes.channels
@@ -247,19 +333,71 @@ export default function CommunityScreen() {
           : [];
       setNotices(mergedNotices);
 
-      if (selectedChannel) {
-        const updated = fetchedChannels.find(
-          (c) => c.id === selectedChannel.id
+      const requestedChannelId = route?.params?.channelId
+        ? String(route.params.channelId)
+        : '';
+      const requestedPostId = route?.params?.postId
+        ? String(route.params.postId)
+        : '';
+      const requestedTab = route?.params?.tab as
+        | 'feed'
+        | 'channels'
+        | 'notices'
+        | undefined;
+
+      if (requestedTab) {
+        setActiveTab(requestedTab);
+      } else if (requestedChannelId || requestedPostId) {
+        setActiveTab('feed');
+      }
+
+      const currentSelected = selectedChannelRef.current;
+      let channelToLoad: CommunityChannel | undefined;
+
+      if (requestedChannelId) {
+        channelToLoad = fetchedChannels.find(
+          (c) => String(c.id) === requestedChannelId
         );
-        if (updated) {
-          await loadChannelPosts(updated);
-        }
-      } else {
-        const firstReadable = fetchedChannels.find(
+      }
+      if (!channelToLoad && currentSelected) {
+        channelToLoad = fetchedChannels.find(
+          (c) => c.id === currentSelected.id
+        );
+      }
+      if (!channelToLoad) {
+        channelToLoad = fetchedChannels.find(
           (c) => c.privacy === 'public' || c.canRead
         );
-        if (firstReadable) {
-          await loadChannelPosts(firstReadable);
+      }
+
+      if (channelToLoad) {
+        setSelectedChannel(channelToLoad);
+        if (
+          !channelToLoad.canRead &&
+          channelToLoad.privacy === 'private' &&
+          !isOfficer
+        ) {
+          setChannelPosts([]);
+        } else {
+          try {
+            const res = await operate<{
+              channel?: CommunityChannel;
+              posts?: CommunityPost[];
+            }>('communityChannel', { channelId: channelToLoad.id });
+            const posts = normalizePosts(res?.posts || []);
+            setChannelPosts(posts);
+            if (requestedPostId) {
+              const targetPost = posts.find(
+                (p) => String(p.id) === requestedPostId
+              );
+              if (targetPost) {
+                openCommentsModal(targetPost);
+              }
+            }
+          } catch (error) {
+            console.warn('communityChannel warning:', error);
+            setChannelPosts([]);
+          }
         }
       }
     } catch (error) {
@@ -267,11 +405,34 @@ export default function CommunityScreen() {
     } finally {
       setIsLoading(false);
     }
-  }, [selectedChannel, loadChannelPosts]);
+  }, [
+    loadChannelPosts,
+    isOfficer,
+    route?.params?.channelId,
+    route?.params?.postId,
+    route?.params?.tab,
+  ]);
 
   useEffect(() => {
-    fetchCommunityData();
-  }, []);
+    if (
+      route?.params?.channelId ||
+      route?.params?.postId ||
+      route?.params?.tab
+    ) {
+      fetchCommunityData();
+    }
+  }, [
+    route?.params?.channelId,
+    route?.params?.postId,
+    route?.params?.tab,
+    fetchCommunityData,
+  ]);
+
+  useFocusEffect(
+    useCallback(() => {
+      fetchCommunityData();
+    }, [fetchCommunityData])
+  );
 
   const handleSearch = async () => {
     const q = searchQuery.trim();
@@ -421,11 +582,16 @@ export default function CommunityScreen() {
     if (!isVerifiedOwner) {
       Alert.alert(
         'Verified Account Required',
-        'Only CVO-Verified Pet Owners can publish posts.'
+        'Only CVO-Verified Pet Owners and Field Officers can publish posts.'
       );
       return;
     }
-    if (!selectedChannel) {
+    const targetChannel =
+      selectedChannel ||
+      channels.find((c) => c.privacy === 'public' || c.canRead) ||
+      channels[0] ||
+      null;
+    if (!targetChannel && !(isOfficer && postKind === 'announcement')) {
       Alert.alert('Select a Channel', 'Please choose a channel first.');
       return;
     }
@@ -433,6 +599,13 @@ export default function CommunityScreen() {
       Alert.alert('Missing Fields', 'Please enter a post title and message.');
       return;
     }
+
+    const isOfficialPost = isOfficer && postKind === 'announcement';
+    const cleanTitle = postTitle.trim();
+    const formattedTitle =
+      isOfficialPost && !/^\[?(official|cvo)/i.test(cleanTitle)
+        ? `[Official Announcement] ${cleanTitle}`
+        : cleanTitle;
 
     setIsSubmitting(true);
     try {
@@ -442,18 +615,59 @@ export default function CommunityScreen() {
         uploadedIds.push(fid);
       }
 
-      await operate('communityCreatePost', {
-        channelId: selectedChannel.id,
-        title: postTitle.trim(),
-        body: postBody.trim(),
-        imageFileIds: uploadedIds,
-      });
+      if (targetChannel) {
+        await operate('communityCreatePost', {
+          channelId: targetChannel.id,
+          title: formattedTitle,
+          body: postBody.trim(),
+          imageFileIds: uploadedIds,
+          authorRole: isOfficer ? 'officer' : 'owner',
+          accountType: isOfficer ? 'officer' : 'owner',
+          isOfficial: isOfficialPost,
+        });
+      }
+
+      if (isOfficialPost) {
+        try {
+          await operate('communityCreateAnnouncement', {
+            title: cleanTitle,
+            body: postBody.trim(),
+            category: 'announcement',
+            audience: 'both',
+            priority: 'info',
+            barangay: user?.barangay || 'All Barangays',
+          });
+        } catch {
+          // Fallback to local notice refresh if backend stores announcements via channel posts
+        }
+        const createdNotice: CommunityNotice = {
+          id: `notice-${Date.now()}`,
+          title: cleanTitle,
+          body: postBody.trim(),
+          category: 'announcement',
+          audience: 'both',
+          priority: 'info',
+          date: new Date().toISOString(),
+          barangay: user?.barangay || 'All Barangays',
+          isActive: true,
+        };
+        setNotices((prev) => [createdNotice, ...prev]);
+      }
 
       setIsCreatePostVisible(false);
+      setPostKind('discussion');
       setPostTitle('');
       setPostBody('');
       setPostImages([]);
-      await loadChannelPosts(selectedChannel);
+      if (targetChannel) {
+        await loadChannelPosts(targetChannel);
+      }
+      Alert.alert(
+        'Saved successfully',
+        isOfficialPost
+          ? 'Your official announcement has been published.'
+          : 'Your community post has been published.'
+      );
     } catch (error: any) {
       Alert.alert('Post Failed', error?.message || 'Could not publish post.');
     } finally {
@@ -462,7 +676,10 @@ export default function CommunityScreen() {
   };
 
   const handleDeletePost = (postId: string) => {
-    Alert.alert('Delete Post?', 'Soft-delete your discussion post?', [
+    Alert.alert(
+      'Delete Post?',
+      'Are you sure you want to delete your discussion post?',
+      [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Delete',
@@ -512,7 +729,16 @@ export default function CommunityScreen() {
         post?: CommunityPost;
         comments?: CommunityComment[];
       }>('communityComments', { postId: post.id });
-      setComments(Array.isArray(res?.comments) ? res.comments : []);
+      const rawComments = Array.isArray(res?.comments) ? res.comments : [];
+      setComments(
+        rawComments.map((c: any) => ({
+          ...c,
+          id: String(c.id || c.$id || ''),
+          authorRole: c.authorRole || c.role || c.accountType || undefined,
+          accountType: c.accountType || c.authorRole || c.role || undefined,
+          isOfficial: Boolean(c.isOfficial),
+        }))
+      );
     } catch {
       setComments([]);
     } finally {
@@ -523,8 +749,8 @@ export default function CommunityScreen() {
   const handleAddComment = async () => {
     if (!isVerifiedOwner) {
       Alert.alert(
-        'Verified Owner Only',
-        'Only CVO-Verified Pet Owners can comment.'
+        'Verified Account Required',
+        'Only CVO-Verified Pet Owners and Field Officers can comment.'
       );
       return;
     }
@@ -535,6 +761,8 @@ export default function CommunityScreen() {
       await operate('communityCreateComment', {
         postId: activePostForComments.id,
         body: newCommentBody.trim(),
+        authorRole: isOfficer ? 'officer' : 'owner',
+        accountType: isOfficer ? 'officer' : 'owner',
         ...(replyToCommentId ? { parentCommentId: replyToCommentId } : {}),
       });
       setNewCommentBody('');
@@ -700,14 +928,20 @@ export default function CommunityScreen() {
                     {selectedChannel.privacy === 'private' ? '🔒 ' : '# '}
                     {selectedChannel.name}
                   </Text>
-                  {isVerifiedOwner && selectedChannel.canRead && (
-                    <TouchableOpacity
-                      style={styles.newPostBtn}
-                      onPress={() => setIsCreatePostVisible(true)}
-                    >
-                      <Text style={styles.newPostBtnText}>+ New Post</Text>
-                    </TouchableOpacity>
-                  )}
+                  {isVerifiedOwner &&
+                    (selectedChannel.canRead ||
+                      selectedChannel.privacy === 'public' ||
+                      isOfficer) && (
+                      <TouchableOpacity
+                        style={styles.newPostBtn}
+                        onPress={() => {
+                          setPostKind('discussion');
+                          setIsCreatePostVisible(true);
+                        }}
+                      >
+                        <Text style={styles.newPostBtnText}>+ New Post</Text>
+                      </TouchableOpacity>
+                    )}
                 </View>
                 {selectedChannel.description ? (
                   <Text style={styles.channelDesc}>
@@ -786,14 +1020,35 @@ export default function CommunityScreen() {
               displayedPosts.map((post) => {
                 const isAuthor =
                   user?.id && String(post.authorId) === String(user.id);
+                const isOfficialAuthor = isOfficialStaffAuthor(
+                  post,
+                  user?.id,
+                  isOfficer
+                );
                 const imageIds = parseImageFileIds(post.imageFileIds);
                 return (
                   <View key={post.id} style={styles.postCard}>
                     <View style={styles.postHeader}>
-                      <Text style={styles.postAuthor}>
-                        👤 {post.authorName} •{' '}
-                        {new Date(post.createdAt).toLocaleDateString()}
-                      </Text>
+                      <View style={styles.authorMetaRow}>
+                        <Text style={styles.postAuthor}>
+                          👤 {post.authorName}
+                        </Text>
+                        {isOfficialAuthor && (
+                          <View
+                            style={[
+                              styles.officialAuthorBadge,
+                              { backgroundColor: colors.primary },
+                            ]}
+                          >
+                            <Text style={styles.officialAuthorBadgeText}>
+                              Official / CVO
+                            </Text>
+                          </View>
+                        )}
+                        <Text style={styles.postAuthor}>
+                          • {new Date(post.createdAt).toLocaleDateString()}
+                        </Text>
+                      </View>
                       {isAuthor && (
                         <TouchableOpacity
                           onPress={() => handleDeletePost(post.id)}
@@ -935,6 +1190,22 @@ export default function CommunityScreen() {
                 Displays official CVO owner-directed outbreak advisories and
                 public announcements.
               </Text>
+              {isOfficer && (
+                <TouchableOpacity
+                  style={[
+                    styles.newPostBtn,
+                    { alignSelf: 'flex-start', marginTop: 10 },
+                  ]}
+                  onPress={() => {
+                    setPostKind('announcement');
+                    setIsCreatePostVisible(true);
+                  }}
+                >
+                  <Text style={styles.newPostBtnText}>
+                    + New Official Announcement
+                  </Text>
+                </TouchableOpacity>
+              )}
             </View>
 
             {notices.length === 0 ? (
@@ -1083,8 +1354,41 @@ export default function CommunityScreen() {
               showsVerticalScrollIndicator={false}
             >
               <Text style={styles.modalTitle}>
-                Post in #{selectedChannel?.name}
+                {isOfficer && postKind === 'announcement'
+                  ? 'Publish Official CVO Announcement'
+                  : `Post in #${selectedChannel?.name || 'Community'}`}
               </Text>
+              {isOfficer && (
+                <>
+                  <Text style={styles.fieldLabel}>Post Type</Text>
+                  <View
+                    style={{ flexDirection: 'row', gap: 8, marginBottom: 8 }}
+                  >
+                    {(['discussion', 'announcement'] as const).map((kind) => (
+                      <TouchableOpacity
+                        key={kind}
+                        style={[
+                          styles.privacyChoice,
+                          postKind === kind && styles.privacyChoiceActive,
+                        ]}
+                        onPress={() => setPostKind(kind)}
+                      >
+                        <Text
+                          style={[
+                            styles.privacyChoiceText,
+                            postKind === kind &&
+                              styles.privacyChoiceTextActive,
+                          ]}
+                        >
+                          {kind === 'discussion'
+                            ? '💬 Discussion Post'
+                            : '📢 Official Announcement'}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                </>
+              )}
               <Text style={styles.fieldLabel}>Title (1–140 chars) *</Text>
               <TextInput
                 style={styles.input}
@@ -1200,6 +1504,11 @@ export default function CommunityScreen() {
                 comments.map((c) => {
                   const isMyComment =
                     user?.id && String(c.authorId) === String(user.id);
+                  const isOfficialCommentAuthor = isOfficialStaffAuthor(
+                    c,
+                    user?.id,
+                    isOfficer
+                  );
                   return (
                     <View
                       key={c.id}
@@ -1209,10 +1518,26 @@ export default function CommunityScreen() {
                       ]}
                     >
                       <View style={styles.postHeader}>
-                        <Text style={styles.postAuthor}>
-                          {c.authorName} •{' '}
-                          {new Date(c.createdAt).toLocaleDateString()}
-                        </Text>
+                        <View style={styles.authorMetaRow}>
+                          <Text style={styles.postAuthor}>
+                            {c.authorName}
+                          </Text>
+                          {isOfficialCommentAuthor && (
+                            <View
+                              style={[
+                                styles.officialAuthorBadge,
+                                { backgroundColor: colors.primary },
+                              ]}
+                            >
+                              <Text style={styles.officialAuthorBadgeText}>
+                                Official / CVO
+                              </Text>
+                            </View>
+                          )}
+                          <Text style={styles.postAuthor}>
+                            • {new Date(c.createdAt).toLocaleDateString()}
+                          </Text>
+                        </View>
                         {isMyComment && (
                           <TouchableOpacity
                             onPress={() => handleDeleteComment(c.id)}
@@ -1466,7 +1791,27 @@ const baseStyles = StyleSheet.create({
   postHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
+    alignItems: 'center',
     marginBottom: 6,
+  },
+  authorMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 6,
+    flex: 1,
+    marginRight: 8,
+  },
+  officialAuthorBadge: {
+    backgroundColor: '#00AEEF',
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 999,
+  },
+  officialAuthorBadgeText: {
+    color: '#FFFFFF',
+    fontSize: 10,
+    fontWeight: 'bold',
   },
   postAuthor: { fontSize: 11, color: '#64748B', fontWeight: '600' },
   deleteText: { fontSize: 11, color: '#D9534F', fontWeight: 'bold' },

@@ -20,8 +20,11 @@ export interface PetProfileRow extends AppwriteMeta {
   ownerId: string;
   petName: string;
   vitalStatus?: 'Alive' | 'Deceased' | 'Missing';
+  ancestry?: string;
   ancestryParentId?: string;
   ancestryParentName?: string;
+  ancestryParent2Id?: string;
+  ancestryParent2Name?: string;
   species: Species;
   breed: string;
   sex: Sex;
@@ -87,10 +90,13 @@ export interface MedicalRecordRow extends AppwriteMeta {
   medicineType: string;
   description?: string;
   dateAdministered: string;
+  recorderNameSnapshot?: string;
+  expiryDate?: string;
 }
 
 export interface OwnershipEventRow extends AppwriteMeta {
   petId: string;
+  petName?: string;
   previousOwnerId: string;
   newOwnerId: string;
   previousOwnerName?: string;

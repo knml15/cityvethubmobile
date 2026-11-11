@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+
+# Expo / build artifacts
+.expo/
+dist/
+web-build/
+android/
+ios/
+
+# Sensitive credentials & service account keys
+*firebase-adminsdk*.json
+*service-account*.json
+*.pem
+*.key
+
+# Temporary files & local tool outputs
+*.log
+*.zip
+repomix*.xml
+mcp_config.json
+build-config.txt
+
+# OS / Editor files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo

@@ -1,4 +1,5 @@
 import CallButton from '../../components/CallButton';
+import NotificationBell from '../../components/NotificationBell';
 import { useThemedStyles } from '../../theme';
 import React, { useState, useEffect, useCallback } from 'react';
 import {
@@ -13,6 +14,8 @@ import {
   ActivityIndicator,
   RefreshControl,
   Image,
+  KeyboardAvoidingView,
+  Platform,
 } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -329,7 +332,7 @@ export default function FieldLookupScreen() {
     if (!searchedPet.officialPetId) {
       Alert.alert(
         'CVO Pet Verification Required',
-        'Official clinical/vaccination records can only be added to CVO-verified pets (`pets.$id`). Ask the owner to request CVO verification and have an administrator approve it first.'
+        'Official clinical and vaccination records can only be added to CVO-verified pets. Ask the owner to submit their pet for CVO verification first.'
       );
       return;
     }
@@ -363,7 +366,7 @@ export default function FieldLookupScreen() {
       await loadPetMedicalAndHistory(searchedPet);
 
       Alert.alert(
-        'Official Record Saved',
+        'Saved successfully',
         `${recordType} (${medicineType}) has been added to ${searchedPet.petName}'s official veterinary record.`
       );
     } catch (error: any) {
@@ -395,13 +398,14 @@ export default function FieldLookupScreen() {
     <View style={[styles.container, { paddingTop: insets.top }]}>
       {/* Officer Header */}
       <View style={styles.header}>
-        <View>
+        <View style={{ flex: 1 }}>
           <Text style={styles.headerTitle}>CVO Field Registry & QR Lookup</Text>
           <Text style={styles.headerSubtitle}>
             Officer: {user?.fullName} • Area: Brgy.{' '}
             {user?.assignedArea || user?.barangay}
           </Text>
         </View>
+        <NotificationBell />
       </View>
 
       <ScrollView
@@ -419,8 +423,8 @@ export default function FieldLookupScreen() {
               Scan Collar QR or Search Registry
             </Text>
             <Text style={styles.instructionBody}>
-              Supports both personal QR passports (`pet_passports`) and CVO
-              verified records (`pets` with Official Registry ID).
+              Look up companion animals by scanning their collar QR code or
+              searching by Registry ID, pet name, or owner name.
             </Text>
           </View>
           <TouchableOpacity
@@ -463,7 +467,7 @@ export default function FieldLookupScreen() {
           <ScrollView horizontal showsHorizontalScrollIndicator={false}>
             {directoryPets.length === 0 ? (
               <Text style={styles.emptyChipsText}>
-                No verified pets found in `pets` table yet.
+                No verified pets found yet.
               </Text>
             ) : (
               directoryPets.map((pet) => {
@@ -656,8 +660,16 @@ export default function FieldLookupScreen() {
         transparent
         onRequestClose={() => setIsScannerVisible(false)}
       >
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalCard}>
+        <KeyboardAvoidingView
+          style={styles.modalOverlay}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        >
+          <View
+            style={[
+              styles.modalCard,
+              { paddingBottom: Math.max(20, insets.bottom + 12) },
+            ]}
+          >
             <View style={styles.scannerHeaderRow}>
               <Text style={styles.modalTitle}>Scan Pet Passport QR</Text>
               <TouchableOpacity
@@ -727,7 +739,7 @@ export default function FieldLookupScreen() {
               </TouchableOpacity>
             </View>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
 
       {/* Modal 2: Add Official Medical Record (`addMedical`) */}
@@ -737,97 +749,126 @@ export default function FieldLookupScreen() {
         transparent
         onRequestClose={() => setIsMedModalVisible(false)}
       >
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>
-              Record Official Vaccination / Treatment
-            </Text>
-            <Text style={styles.modalSub}>
-              Patient: {searchedPet?.petName} (
-              {searchedPet?.officialRegistryId || searchedPet?.$id})
-            </Text>
+        <KeyboardAvoidingView
+          style={styles.modalOverlay}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          keyboardVerticalOffset={Platform.OS === 'ios' ? 24 : 0}
+        >
+          <View
+            style={[
+              styles.modalCard,
+              {
+                maxHeight: '90%',
+                paddingBottom: Math.max(20, insets.bottom + 12),
+              },
+            ]}
+          >
+            <ScrollView
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
+              contentContainerStyle={{
+                paddingBottom: Math.max(16, insets.bottom + 8),
+              }}
+            >
+              <Text style={styles.modalTitle}>
+                Record Official Vaccination / Treatment
+              </Text>
+              <Text style={styles.modalSub}>
+                Patient: {searchedPet?.petName} (
+                {searchedPet?.officialRegistryId || searchedPet?.$id})
+              </Text>
 
-            <Text style={styles.fieldLabel}>
-              Record Type (Contract: Vaccination | Treatment)
-            </Text>
-            <View style={styles.typeRow}>
-              {(['Vaccination', 'Treatment'] as const).map((type) => (
-                <TouchableOpacity
-                  key={type}
-                  style={[
-                    styles.typePill,
-                    recordType === type && styles.typePillActive,
-                  ]}
-                  onPress={() => {
-                    setRecordType(type);
-                    setMedicineType(
-                      type === 'Vaccination'
-                        ? 'Anti-Rabies (Rabisin)'
-                        : 'Clinical Veterinary Treatment'
-                    );
-                  }}
-                >
-                  <Text
+              <Text style={styles.fieldLabel}>Record Type</Text>
+              <View style={styles.typeRow}>
+                {(['Vaccination', 'Treatment'] as const).map((type) => (
+                  <TouchableOpacity
+                    key={type}
                     style={[
-                      styles.typePillText,
-                      recordType === type && styles.typePillTextActive,
+                      styles.typePill,
+                      recordType === type && styles.typePillActive,
                     ]}
+                    onPress={() => {
+                      setRecordType(type);
+                      setMedicineType(
+                        type === 'Vaccination'
+                          ? 'Anti-Rabies (Rabisin)'
+                          : 'Clinical Veterinary Treatment'
+                      );
+                    }}
                   >
-                    {type}
-                  </Text>
+                    <Text
+                      style={[
+                        styles.typePillText,
+                        recordType === type && styles.typePillTextActive,
+                      ]}
+                    >
+                      {type}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+
+              <Text style={styles.fieldLabel}>Vaccine / Medicine Type *</Text>
+              <TextInput
+                style={styles.modalInput}
+                value={medicineType}
+                onChangeText={setMedicineType}
+              />
+
+              <Text style={styles.fieldLabel}>
+                Date Administered (YYYY-MM-DD) *
+              </Text>
+              <TextInput
+                style={styles.modalInput}
+                value={dateAdministered}
+                onChangeText={setDateAdministered}
+              />
+
+              <Text style={styles.fieldLabel}>
+                Clinical Notes / Batch Number
+              </Text>
+              <TextInput
+                style={[
+                  styles.modalInput,
+                  { height: 70, textAlignVertical: 'top' },
+                ]}
+                placeholder="Enter batch number, dosage, or clinical notes..."
+                placeholderTextColor="#94A3B8"
+                value={medDescription}
+                onChangeText={setMedDescription}
+                multiline
+              />
+
+              <View
+                style={[
+                  styles.modalActionRow,
+                  { marginBottom: Math.max(8, insets.bottom) },
+                ]}
+              >
+                <TouchableOpacity
+                  style={styles.cancelBtn}
+                  onPress={() => setIsMedModalVisible(false)}
+                  disabled={isSubmittingMed}
+                >
+                  <Text style={styles.cancelBtnText}>Cancel</Text>
                 </TouchableOpacity>
-              ))}
-            </View>
-
-            <Text style={styles.fieldLabel}>Vaccine / Medicine Type *</Text>
-            <TextInput
-              style={styles.modalInput}
-              value={medicineType}
-              onChangeText={setMedicineType}
-            />
-
-            <Text style={styles.fieldLabel}>
-              Date Administered (YYYY-MM-DD) *
-            </Text>
-            <TextInput
-              style={styles.modalInput}
-              value={dateAdministered}
-              onChangeText={setDateAdministered}
-            />
-
-            <Text style={styles.fieldLabel}>Clinical Notes / Batch Number</Text>
-            <TextInput
-              style={[
-                styles.modalInput,
-                { height: 70, textAlignVertical: 'top' },
-              ]}
-              value={medDescription}
-              onChangeText={setMedDescription}
-              multiline
-            />
-
-            <View style={styles.modalActionRow}>
-              <TouchableOpacity
-                style={styles.cancelBtn}
-                onPress={() => setIsMedModalVisible(false)}
-                disabled={isSubmittingMed}
-              >
-                <Text style={styles.cancelBtnText}>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.submitBtn}
-                onPress={handleAddMedicalRecord}
-                disabled={isSubmittingMed}
-              >
-                {isSubmittingMed ? (
-                  <ActivityIndicator color="#FFFFFF" />
-                ) : (
-                  <Text style={styles.submitBtnText}>Save Official Entry</Text>
-                )}
-              </TouchableOpacity>
-            </View>
+                <TouchableOpacity
+                  style={styles.submitBtn}
+                  onPress={handleAddMedicalRecord}
+                  disabled={isSubmittingMed}
+                >
+                  {isSubmittingMed ? (
+                    <ActivityIndicator color="#FFFFFF" />
+                  ) : (
+                    <Text style={styles.submitBtnText}>
+                      Save Official Entry
+                    </Text>
+                  )}
+                </TouchableOpacity>
+              </View>
+            </ScrollView>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
     </View>
   );

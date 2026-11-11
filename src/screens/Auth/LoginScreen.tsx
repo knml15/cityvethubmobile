@@ -12,6 +12,7 @@ import {
   ActivityIndicator,
   Alert,
   Modal,
+  Image,
 } from 'react-native';
 import { useAuthStore } from '../../store';
 import { account, PUBLIC_PASSPORT_BASE_URL } from '../../api/client';
@@ -78,6 +79,11 @@ export default function LoginScreen({ navigation }: any) {
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
     >
       <View style={styles.formContainer}>
+        <Image
+          source={require('../../../assets/logo.png')}
+          style={styles.logo}
+          resizeMode="contain"
+        />
         <View style={styles.badgePill}>
           <Text style={styles.badgePillText}>ILIGAN CITY VETERINARY OFFICE</Text>
         </View>
@@ -196,6 +202,12 @@ const baseStyles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     paddingHorizontal: 24,
+  },
+  logo: {
+    width: 96,
+    height: 96,
+    alignSelf: 'center',
+    marginBottom: 14,
   },
   badgePill: {
     alignSelf: 'center',

@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "95968477201",
+    "project_id": "cityvethub",
+    "storage_bucket": "cityvethub.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:95968477201:android:45b0de5ec2f2658a8cb1b0",
+        "android_client_info": {
+          "package_name": "com.cityvethub.iligan"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBSklAfS-D4hEDfDaVYFcxj42TE1ZvKW0Y"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

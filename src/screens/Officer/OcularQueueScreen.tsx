@@ -1,5 +1,7 @@
 import { useThemedStyles } from '../../theme';
-import React, { useEffect, useState, useCallback } from 'react';
+import NotificationBell from '../../components/NotificationBell';
+import React, { useState, useCallback } from 'react';
+import { useFocusEffect } from '@react-navigation/native';
 import {
   View,
   Text,
@@ -39,9 +41,11 @@ export default function OcularQueueScreen() {
     }
   }, [fetchDiseaseAlerts]);
 
-  useEffect(() => {
-    loadStaffAlertsAndNotices();
-  }, [loadStaffAlertsAndNotices]);
+  useFocusEffect(
+    useCallback(() => {
+      loadStaffAlertsAndNotices();
+    }, [loadStaffAlertsAndNotices])
+  );
 
   // Combine `disease_alerts` with officer-targeted `communityOfficialNotices`
   const combinedFeed = [
@@ -71,7 +75,7 @@ export default function OcularQueueScreen() {
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
       <View style={styles.header}>
-        <View>
+        <View style={{ flex: 1 }}>
           <Text style={styles.headerTitle}>
             Staff Alerts & CVO Announcements
           </Text>
@@ -80,6 +84,7 @@ export default function OcularQueueScreen() {
             {combinedFeed.length} active notice(s)
           </Text>
         </View>
+        <NotificationBell />
       </View>
 
       <View style={styles.filterRow}>
@@ -120,8 +125,7 @@ export default function OcularQueueScreen() {
               No Active Staff Outbreaks or Announcements
             </Text>
             <Text style={styles.emptySub}>
-              Pull down to sync with `disease_alerts` and CVO staff
-              announcements.
+              Pull down to refresh active alerts and CVO staff announcements.
             </Text>
           </View>
         }
@@ -157,6 +161,9 @@ const baseStyles = StyleSheet.create({
     backgroundColor: '#1E293B',
     paddingHorizontal: 16,
     paddingVertical: 14,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
   },
   headerTitle: { color: '#FFFFFF', fontSize: 16, fontWeight: 'bold' },
   headerSub: { color: '#94A3B8', fontSize: 12, marginTop: 2 },

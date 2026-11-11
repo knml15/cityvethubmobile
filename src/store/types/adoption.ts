@@ -87,12 +87,26 @@ export interface CommunityChannel {
   createdAt?: string;
 }
 
+export type CommunityAuthorRole =
+  | 'owner'
+  | 'officer'
+  | 'admin'
+  | 'staff'
+  | 'VET_OFFICER'
+  | 'CVO_ADMIN'
+  | 'CITIZEN'
+  | string;
+
 export interface CommunityPost {
   id: string;
   channelId: string;
   channelName?: string;
   authorId: string;
   authorName: string;
+  authorRole?: CommunityAuthorRole;
+  accountType?: CommunityAuthorRole;
+  role?: CommunityAuthorRole;
+  isOfficial?: boolean;
   title: string;
   body: string;
   imageFileIds: string[];
@@ -111,6 +125,10 @@ export interface CommunityComment {
   parentCommentId: string;
   authorId: string;
   authorName: string;
+  authorRole?: CommunityAuthorRole;
+  accountType?: CommunityAuthorRole;
+  role?: CommunityAuthorRole;
+  isOfficial?: boolean;
   body: string;
   isDeleted: boolean;
   createdAt: string;

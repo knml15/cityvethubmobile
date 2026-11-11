@@ -158,8 +158,8 @@ export default function PetDetailScreen() {
       await fetchAvailablePets();
       setPhotoModalVisible(false);
       Alert.alert(
-        'Listing Photos Updated',
-        'Your photo-sharing consent for this listing has been updated.'
+        'Saved successfully',
+        'Your photo-sharing preferences for this listing have been updated.'
       );
     } catch (error: any) {
       Alert.alert(

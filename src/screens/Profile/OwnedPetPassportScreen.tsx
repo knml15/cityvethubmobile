@@ -44,6 +44,25 @@ import {
 } from '../../store/types/pets';
 import { useAdoptionStore } from '../../store';
 
+const COAT_COLORS = [
+  'Black',
+  'White',
+  'Brown',
+  'Cream',
+  'Gray',
+  'Orange',
+  'Golden',
+  'Tan',
+  'Ginger',
+  'Calico',
+  'Tortoiseshell',
+  'Tabby',
+  'Brindle',
+  'Spotted',
+  'Mixed',
+  'Other / Unknown',
+] as const;
+
 export default function OwnedPetPassportScreen({ route, navigation }: any) {
   const styles = useThemedStyles(baseStyles);
   const colors = useAppPalette();
@@ -78,6 +97,7 @@ export default function OwnedPetPassportScreen({ route, navigation }: any) {
     'Alive' | 'Deceased' | 'Missing'
   >('Alive');
   const [editAncestryParentId, setEditAncestryParentId] = useState('');
+  const [editAncestryParent2Id, setEditAncestryParent2Id] = useState('');
   const [possibleParents, setPossibleParents] = useState<PetProfileRow[]>([]);
   const [editBarangay, setEditBarangay] =
     useState<IliganBarangay>('Hinaplanon');
@@ -137,6 +157,7 @@ export default function OwnedPetPassportScreen({ route, navigation }: any) {
       setEditAge(String(profile.ageYears ?? 1));
       setEditVitalStatus(profile.vitalStatus || 'Alive');
       setEditAncestryParentId(profile.ancestryParentId || '');
+      setEditAncestryParent2Id(profile.ancestryParent2Id || '');
       setEditBarangay(normalizeBarangay(profile.barangay));
       setEditTitle(profile.profileTitle || '');
       setEditDescription(profile.profileDescription || '');
@@ -154,13 +175,16 @@ export default function OwnedPetPassportScreen({ route, navigation }: any) {
           TABLES.PET_PROFILES,
           [Query.equal('ownerId', profile.ownerId), Query.limit(100)]
         );
-        setPossibleParents(
-          parentsResponse.documents.filter(
-            (candidate) =>
-              candidate.$id !== petProfileId &&
-              candidate.species === profile.species
-          ) as unknown as PetProfileRow[]
+        const rawCandidates = (
+          parentsResponse.documents as unknown as PetProfileRow[]
+        ).filter(
+          (candidate) =>
+            candidate.$id !== petProfileId &&
+            candidate.species === profile.species &&
+            candidate.ancestryParentId !== petProfileId &&
+            candidate.ancestryParent2Id !== petProfileId
         );
+        setPossibleParents(rawCandidates);
       } catch {
         setPossibleParents([]);
       }
@@ -270,14 +294,46 @@ export default function OwnedPetPassportScreen({ route, navigation }: any) {
   const displayPhotoUrl =
     getMediaFileUrl(petDoc?.photoFileId) || initialPet.photoUrl;
 
+  const isNonCircularCandidate = (candidate: PetProfileRow) =>
+    candidate.$id !== petProfileId &&
+    candidate.ancestryParentId !== petProfileId &&
+    candidate.ancestryParent2Id !== petProfileId;
+
+  const possibleSires = possibleParents.filter(
+    (p) =>
+      p.species ===
+        (canEditIdentity ? editSpecies : petDoc?.species || editSpecies) &&
+      p.sex === 'Male' &&
+      p.$id !== editAncestryParent2Id &&
+      isNonCircularCandidate(p)
+  );
+  const possibleDams = possibleParents.filter(
+    (p) =>
+      p.species ===
+        (canEditIdentity ? editSpecies : petDoc?.species || editSpecies) &&
+      p.sex === 'Female' &&
+      p.$id !== editAncestryParentId &&
+      isNonCircularCandidate(p)
+  );
+
+  const parent1DisplayName =
+    petDoc?.ancestryParentName ||
+    possibleParents.find((p) => p.$id === petDoc?.ancestryParentId)?.petName ||
+    '';
+
+  const parent2DisplayName =
+    petDoc?.ancestryParent2Name ||
+    possibleParents.find((p) => p.$id === petDoc?.ancestryParent2Id)?.petName ||
+    '';
+
   const handleRequestPetVerification = async () => {
     setIsProcessing(true);
     try {
       await operate('requestPetVerification', { petProfileId });
       await loadFullPetData();
       Alert.alert(
-        'Sent for CVO Verification',
-        'Your pet profile has been submitted to the City Veterinary Office. Once approved on the CVO Web Panel, an Official Registry ID will be assigned.'
+        'Submitted for Verification',
+        'Your pet profile has been submitted to the City Veterinary Office for verification.'
       );
     } catch (error: any) {
       Alert.alert(
@@ -294,13 +350,13 @@ export default function OwnedPetPassportScreen({ route, navigation }: any) {
     try {
       await operate('ensurePetPassport', { petProfileId });
       Alert.alert(
-        'Public QR Synced',
-        'Public passport snapshot (`pet_passports`) is synced and active.'
+        'Saved successfully',
+        'Your public QR passport has been synced and updated.'
       );
     } catch (error: any) {
       Alert.alert(
         'Passport Sync Notice',
-        error?.message || 'Could not repair public passport row.'
+        error?.message || 'Could not sync public QR passport. Please try again.'
       );
     } finally {
       setIsProcessing(false);
@@ -329,6 +385,22 @@ export default function OwnedPetPassportScreen({ route, navigation }: any) {
         uploadedPhotoId = await uploadMediaFile(newPhotoAsset);
       }
 
+      if (
+        editAncestryParentId &&
+        editAncestryParent2Id &&
+        editAncestryParentId === editAncestryParent2Id
+      ) {
+        throw new Error(
+          'Sire (Parent 1) and Dam (Parent 2) cannot be the same pet.'
+        );
+      }
+      if (
+        editAncestryParentId === petProfileId ||
+        editAncestryParent2Id === petProfileId
+      ) {
+        throw new Error('A pet cannot be listed as its own parent.');
+      }
+
       if (canEditIdentity) {
         const ageInt = parseInt(editAge, 10);
         if (isNaN(ageInt) || ageInt < 0 || ageInt > 40) {
@@ -346,6 +418,7 @@ export default function OwnedPetPassportScreen({ route, navigation }: any) {
           photoFileId: uploadedPhotoId,
           vitalStatus: editVitalStatus,
           ancestryParentId: editAncestryParentId,
+          ancestryParent2Id: editAncestryParent2Id,
           profileTitle: editTitle.trim(),
           profileDescription: editDescription.trim(),
           homeAddress: editHomeAddress.trim(),
@@ -361,6 +434,7 @@ export default function OwnedPetPassportScreen({ route, navigation }: any) {
           petProfileId,
           vitalStatus: editVitalStatus,
           ancestryParentId: editAncestryParentId,
+          ancestryParent2Id: editAncestryParent2Id,
           color: editColor.trim(),
           profileTitle: editTitle.trim(),
           profileDescription: editDescription.trim(),
@@ -378,7 +452,7 @@ export default function OwnedPetPassportScreen({ route, navigation }: any) {
       setNewPhotoAsset(null);
       await loadFullPetData();
       Alert.alert(
-        'Pet Updated',
+        'Saved successfully',
         'Your pet profile and public QR privacy settings have been saved.'
       );
     } catch (error: any) {
@@ -395,7 +469,7 @@ export default function OwnedPetPassportScreen({ route, navigation }: any) {
     if (!canEditIdentity) {
       Alert.alert(
         'Cannot Delete',
-        'Only draft or rejected pet profiles can be deleted.'
+        'Only unverified or rejected pet profiles can be deleted.'
       );
       return;
     }
@@ -458,7 +532,7 @@ export default function OwnedPetPassportScreen({ route, navigation }: any) {
       setHealthFileAsset(null);
       await loadFullPetData();
       Alert.alert(
-        'Health Document Uploaded',
+        'Saved successfully',
         'Your personal pet health document has been saved.'
       );
     } catch (error: any) {
@@ -524,7 +598,7 @@ export default function OwnedPetPassportScreen({ route, navigation }: any) {
       setIsAdoptModalVisible(false);
       await loadFullPetData();
       Alert.alert(
-        'Listed for Adoption!',
+        'Listed successfully',
         `${
           petDoc?.petName || initialPet.name
         } is now live on the Adoption Feed. You can review incoming applications in your Profile > Adoptions tab.`
@@ -582,9 +656,9 @@ export default function OwnedPetPassportScreen({ route, navigation }: any) {
               styles.statusBadge,
               verifStatus === 'verified'
                 ? styles.badgeReg
-                : verifStatus === 'pending'
-                ? styles.badgePending
-                : styles.badgeDraft,
+                : verifStatus === 'rejected'
+                ? styles.badgeDraft
+                : styles.badgePending,
             ]}
           >
             <Text
@@ -592,18 +666,16 @@ export default function OwnedPetPassportScreen({ route, navigation }: any) {
                 styles.badgeText,
                 verifStatus === 'verified'
                   ? styles.textReg
-                  : verifStatus === 'pending'
-                  ? styles.textPending
-                  : styles.textDraft,
+                  : verifStatus === 'rejected'
+                  ? styles.textDraft
+                  : styles.textPending,
               ]}
             >
               {verifStatus === 'verified'
                 ? '✓ CVO Verified'
-                : verifStatus === 'pending'
-                ? 'Pending CVO Review'
                 : verifStatus === 'rejected'
                 ? 'Verification Rejected'
-                : 'Personal Draft'}
+                : 'Pending Verification'}
             </Text>
           </View>
         </View>
@@ -661,10 +733,19 @@ export default function OwnedPetPassportScreen({ route, navigation }: any) {
               disabled={isProcessing}
             >
               <Text style={styles.actionBtnDeleteText}>
-                🗑️ Delete Draft Profile
+                🗑️ Delete Pet Profile
               </Text>
             </TouchableOpacity>
           )}
+        </View>
+
+        <View style={styles.sectionCard}>
+          <Text style={styles.sectionTitle}>Pet Description</Text>
+          <Text style={styles.petBreed}>
+            {petDoc?.profileDescription ||
+              petDoc?.profileTitle ||
+              'No pet description added yet.'}
+          </Text>
         </View>
 
         <View style={styles.sectionCard}>
@@ -673,11 +754,10 @@ export default function OwnedPetPassportScreen({ route, navigation }: any) {
             Status: {petDoc?.vitalStatus || 'Alive'}
           </Text>
           <Text style={styles.petBreed}>
-            Parent:{' '}
-            {petDoc?.ancestryParentName ||
-              possibleParents.find((p) => p.$id === petDoc?.ancestryParentId)
-                ?.petName ||
-              'Unknown / not listed'}
+            Sire (Parent 1): {parent1DisplayName || 'Unknown / not listed'}
+          </Text>
+          <Text style={styles.petBreed}>
+            Dam (Parent 2): {parent2DisplayName || 'Unknown / not listed'}
           </Text>
           <Text style={styles.petBreed}>
             Tap Edit Profile & QR Privacy above to update ancestry.
@@ -737,7 +817,7 @@ export default function OwnedPetPassportScreen({ route, navigation }: any) {
                 onPress={handleRepairPassport}
               >
                 <Text style={[styles.smallQrBtnText, { color: '#334155' }]}>
-                  🔄 Sync Public Row
+                  🔄 Sync Public QR
                 </Text>
               </TouchableOpacity>
             </View>
@@ -780,9 +860,8 @@ export default function OwnedPetPassportScreen({ route, navigation }: any) {
           </Text>
           {medicalRecords.length === 0 ? (
             <Text style={styles.emptyText}>
-              No clinician-logged vaccinations or treatments in `medical_records`
-              yet. A CVO Field Officer can scan your QR code to log official
-              vaccinations.
+              No clinician-logged vaccinations or treatments yet. A CVO Field
+              Officer can scan your QR code to log official vaccinations.
             </Text>
           ) : (
             medicalRecords.map((rec) => (
@@ -954,15 +1033,26 @@ export default function OwnedPetPassportScreen({ route, navigation }: any) {
                 </>
               )}
 
-              <Text style={styles.fieldLabel}>Coat color</Text>
-              <TextInput
-                style={styles.textInput}
-                value={editColor}
-                onChangeText={setEditColor}
-                maxLength={50}
-                placeholder="e.g. Black, white, brown, tabby"
-                placeholderTextColor="#94A3B8"
-              />
+              <Text style={styles.fieldLabel}>Coat Color</Text>
+              <View style={styles.pickerBox}>
+                <Picker
+                  selectedValue={editColor}
+                  onValueChange={(v) => setEditColor(String(v))}
+                  style={{ color: colors.text, width: '100%' }}
+                  dropdownIconColor={colors.text}
+                >
+                  <Picker.Item label="Select coat color" value="" />
+                  {Array.from(
+                    new Set([...COAT_COLORS, editColor].filter(Boolean))
+                  ).map((colorOption) => (
+                    <Picker.Item
+                      key={colorOption}
+                      label={colorOption}
+                      value={colorOption}
+                    />
+                  ))}
+                </Picker>
+              </View>
               <Text style={styles.fieldLabel}>
                 Vital status (alive / deceased / missing)
               </Text>
@@ -978,44 +1068,90 @@ export default function OwnedPetPassportScreen({ route, navigation }: any) {
                   <Picker.Item label="Missing" value="Missing" />
                 </Picker>
               </View>
-              <Text style={styles.fieldLabel}>Ancestry — linked parent</Text>
+              <Text style={styles.fieldLabel}>
+                Sire / Parent 1 (Male — same species)
+              </Text>
               <View style={styles.pickerBox}>
                 <Picker
                   selectedValue={editAncestryParentId}
-                  onValueChange={setEditAncestryParentId}
+                  onValueChange={(v) => {
+                    const val = String(v);
+                    setEditAncestryParentId(val);
+                    if (val && val === editAncestryParent2Id) {
+                      setEditAncestryParent2Id('');
+                    }
+                  }}
                   style={{ color: colors.text, width: '100%' }}
                   dropdownIconColor={colors.text}
                 >
                   <Picker.Item label="Unknown / not listed" value="" />
-                  {possibleParents.map((parent) => (
+                  {possibleSires.map((parent) => (
                     <Picker.Item
                       key={parent.$id}
                       label={`${parent.petName} · ${parent.breed}`}
                       value={parent.$id}
                     />
                   ))}
-                  {!!petDoc?.ancestryParentId &&
-                    !possibleParents.some(
-                      (p) => p.$id === petDoc.ancestryParentId
+                  {!!editAncestryParentId &&
+                    !possibleSires.some(
+                      (p) => p.$id === editAncestryParentId
                     ) && (
                       <Picker.Item
                         label={`${
-                          petDoc.ancestryParentName || 'Historical parent'
+                          parent1DisplayName || 'Historical parent 1'
                         } (retained)`}
-                        value={petDoc.ancestryParentId}
+                        value={editAncestryParentId}
                       />
                     )}
                 </Picker>
               </View>
 
-              <Text style={styles.fieldLabel}>Passport Headline / Title</Text>
+              <Text style={styles.fieldLabel}>
+                Dam / Parent 2 (Female — same species)
+              </Text>
+              <View style={styles.pickerBox}>
+                <Picker
+                  selectedValue={editAncestryParent2Id}
+                  onValueChange={(v) => {
+                    const val = String(v);
+                    setEditAncestryParent2Id(val);
+                    if (val && val === editAncestryParentId) {
+                      setEditAncestryParentId('');
+                    }
+                  }}
+                  style={{ color: colors.text, width: '100%' }}
+                  dropdownIconColor={colors.text}
+                >
+                  <Picker.Item label="Unknown / not listed" value="" />
+                  {possibleDams.map((parent) => (
+                    <Picker.Item
+                      key={parent.$id}
+                      label={`${parent.petName} · ${parent.breed}`}
+                      value={parent.$id}
+                    />
+                  ))}
+                  {!!editAncestryParent2Id &&
+                    !possibleDams.some(
+                      (p) => p.$id === editAncestryParent2Id
+                    ) && (
+                      <Picker.Item
+                        label={`${
+                          parent2DisplayName || 'Historical parent 2'
+                        } (retained)`}
+                        value={editAncestryParent2Id}
+                      />
+                    )}
+                </Picker>
+              </View>
+
+              <Text style={styles.fieldLabel}>Pet Description</Text>
               <TextInput
                 style={styles.textInput}
                 value={editTitle}
                 onChangeText={setEditTitle}
               />
 
-              <Text style={styles.fieldLabel}>Pet Description / Notes</Text>
+              <Text style={styles.fieldLabel}>Additional Notes</Text>
               <TextInput
                 style={[styles.textInput, { height: 65 }]}
                 value={editDescription}

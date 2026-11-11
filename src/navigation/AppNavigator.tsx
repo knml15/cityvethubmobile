@@ -1,9 +1,16 @@
-import React from 'react';
-import { NavigationContainer, DarkTheme, DefaultTheme } from '@react-navigation/native';
+import React, { useEffect } from 'react';
+import {
+  NavigationContainer,
+  DarkTheme,
+  DefaultTheme,
+  createNavigationContainerRef,
+} from '@react-navigation/native';
+import * as Notifications from 'expo-notifications';
 import { useAppPalette } from '../theme';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { RootStackParamList } from './types';
 import OwnedPetPassportScreen from '../screens/Profile/OwnedPetPassportScreen';
+import { buildPetDetailPayload } from '../components/NotificationBell';
 
 // Navigators
 import TabNavigator from './TabNavigator';
@@ -17,9 +24,10 @@ import RegisterScreen from '../screens/Auth/RegisterScreen';
 import PetDetailScreen from '../screens/Adoption/PetDetailScreen';
 
 // Global Auth State
-import { useAuthStore } from '../store';
+import { useAuthStore, useAdoptionStore } from '../store';
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
+export const navigationRef = createNavigationContainerRef<RootStackParamList>();
 
 export default function AppNavigator() {
   const { isAuthenticated, user } = useAuthStore();
@@ -31,15 +39,76 @@ export default function AppNavigator() {
       border: colors.border, primary: colors.primary },
   };
 
+  const isOfficer =
+    user?.contractRole === 'officer' ||
+    user?.role === 'VET_OFFICER' ||
+    user?.role === 'CVO_ADMIN';
+
+  useEffect(() => {
+    if (!isAuthenticated) return;
+
+    let responseSub: Notifications.EventSubscription | null = null;
+    try {
+      responseSub = Notifications.addNotificationResponseReceivedListener(
+        async (response) => {
+          const data = response?.notification?.request?.content?.data as
+            | Record<string, any>
+            | undefined;
+          if (!data) return;
+
+          if (data.type === 'adoption_match' && data.listingId) {
+            const targetListingId = String(data.listingId);
+            let matched = useAdoptionStore
+              .getState()
+              .availablePets.find(
+                (item) => String(item.listingId || item.id) === targetListingId
+              );
+
+            if (!matched) {
+              await useAdoptionStore.getState().fetchAvailablePets();
+              matched = useAdoptionStore
+                .getState()
+                .availablePets.find(
+                  (item) =>
+                    String(item.listingId || item.id) === targetListingId
+                );
+            }
+
+            if (navigationRef.isReady()) {
+              const detailPayload = matched
+                ? buildPetDetailPayload(matched, user?.id)
+                : null;
+              if (detailPayload) {
+                navigationRef.navigate('PetDetail', detailPayload);
+              } else if (!isOfficer) {
+                navigationRef.navigate('MainApp');
+              }
+            }
+          }
+        }
+      );
+    } catch (err) {
+      console.warn('Notification response listener skipped:', err);
+    }
+
+    return () => {
+      try {
+        responseSub?.remove();
+      } catch {
+        // Ignore cleanup errors in Expo Go
+      }
+    };
+  }, [isAuthenticated, user?.id, isOfficer]);
+
   return (
-    <NavigationContainer theme={navTheme}>
+    <NavigationContainer ref={navigationRef} theme={navTheme}>
       <Stack.Navigator screenOptions={{ headerShown: false }}>
         {!isAuthenticated ? (
           <Stack.Group>
             <Stack.Screen name="Login" component={LoginScreen} />
             <Stack.Screen name="Register" component={RegisterScreen} />
           </Stack.Group>
-        ) : user?.contractRole === 'officer' ? (
+        ) : isOfficer ? (
           // Approved Field Officer Workflows (cityvethub-field-officers Team Member)
           <Stack.Group>
             <Stack.Screen name="OfficerApp" component={OfficerTabNavigator} />

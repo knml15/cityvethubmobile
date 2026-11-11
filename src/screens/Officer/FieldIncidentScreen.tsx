@@ -1,4 +1,5 @@
 import FullscreenMap from '../../components/FullscreenMap';
+import NotificationBell from '../../components/NotificationBell';
 import * as ImagePicker from 'expo-image-picker';
 import {
   Image,
@@ -13,7 +14,8 @@ import {
   StaffIncidentDetails,
 } from '../../api/phase422';
 import { useAppPalette, useThemedStyles } from '../../theme';
-import React, { useEffect, useState, useMemo } from 'react';
+import React, { useEffect, useState, useMemo, useCallback } from 'react';
+import { useFocusEffect } from '@react-navigation/native';
 import {
   View,
   Text,
@@ -107,10 +109,12 @@ export default function FieldIncidentScreen() {
   const [reportError, setReportError] = useState('');
   const [fullscreen, setFullscreen] = useState(false);
 
-  useEffect(() => {
-    fetchStaffReports();
-    fetchIncidentCategories();
-  }, [fetchStaffReports, fetchIncidentCategories]);
+  useFocusEffect(
+    useCallback(() => {
+      fetchStaffReports();
+      fetchIncidentCategories();
+    }, [fetchStaffReports, fetchIncidentCategories])
+  );
 
   useEffect(() => {
     if (incidentCategories.length > 0 && !selectedCategory) {
@@ -280,12 +284,15 @@ export default function FieldIncidentScreen() {
             {filteredReports.length} reports)
           </Text>
         </View>
-        <TouchableOpacity
-          style={styles.newReportBtn}
-          onPress={() => setIsModalVisible(true)}
-        >
-          <Text style={styles.newReportBtnText}>+ Log Incident</Text>
-        </TouchableOpacity>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+          <TouchableOpacity
+            style={styles.newReportBtn}
+            onPress={() => setIsModalVisible(true)}
+          >
+            <Text style={styles.newReportBtnText}>+ Log Incident</Text>
+          </TouchableOpacity>
+          <NotificationBell />
+        </View>
       </View>
 
       <View

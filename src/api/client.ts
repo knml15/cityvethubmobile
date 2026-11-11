@@ -32,6 +32,8 @@ export const ANDROID_PACKAGE_ID =
 export const PUBLIC_PASSPORT_BASE_URL =
   process.env.EXPO_PUBLIC_PUBLIC_PASSPORT_BASE_URL ||
   'https://cityvethub.appwrite.network';
+export const APPWRITE_PUSH_PROVIDER_ID =
+  process.env.EXPO_PUBLIC_APPWRITE_PUSH_PROVIDER_ID || undefined;
 
 // All 19 Core Tables + 6 Server-Only Community Tables
 export const TABLES = {
@@ -126,12 +128,9 @@ export async function operate<T = any>(
     parsedBody?.error ||
     statusCode >= 400
   ) {
-    const stageInfo = parsedBody?.stage ? ` [${parsedBody.stage}]` : '';
     throw new Error(
       parsedBody?.error ||
-        `Operation "${action}" failed${stageInfo} (Execution: ${
-          execution?.$id || 'unknown'
-        })`
+        'Unable to complete the request right now. Please try again.'
     );
   }
 

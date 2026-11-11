@@ -1,0 +1,37 @@
+{
+  "name": "city-vet-hub-mobile",
+  "version": "1.2.0",
+  "dependencies": {
+    "@react-native-picker/picker": "2.11.4",
+    "@react-navigation/bottom-tabs": "^7.21.0",
+    "@react-navigation/native": "^7.5.1",
+    "@react-navigation/native-stack": "^7.21.0",
+    "axios": "^1.21.0",
+    "expo": "~58.0.23",
+    "expo-camera": "~58.0.14",
+    "expo-file-system": "~58.0.13",
+    "expo-image-picker": "~58.0.10",
+    "expo-secure-store": "~58.0.2",
+    "expo-status-bar": "~58.0.4",
+    "react": "19.3.0",
+    "react-native": "0.88.1",
+    "react-native-appwrite": "^3.2.0",
+    "react-native-safe-area-context": "~5.11.1",
+    "react-native-screens": "~4.30.1",
+    "react-native-url-polyfill": "^4.0.0",
+    "react-native-webview": "14.0.1",
+    "zustand": "^5.0.16"
+  },
+  "devDependencies": {
+    "@types/react": "^19.3.0",
+    "@types/react-native": "^0.72.8",
+    "typescript": "~6.0.3"
+  },
+  "scripts": {
+    "start": "expo start --clear",
+    "android": "expo start --android",
+    "typecheck": "tsc --noEmit",
+    "verify:source": "node tests/verify_source.cjs",
+    "verify:phase422": "node tests/verify_phase422.cjs"
+  }
+}

@@ -1,27 +1,40 @@
 import { useAppPalette, useThemedStyles } from '../../theme';
-import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { useFocusEffect, useRoute } from '@react-navigation/native';
+import React, {
+  ComponentRef,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
+import {
+  useFocusEffect,
+  useNavigation,
+  useRoute,
+} from '@react-navigation/native';
+import { useLiveSync } from '../../utils/useLiveSync';
 import * as ImagePicker from 'expo-image-picker';
 import {
-  View,
-  Text,
-  StyleSheet,
-  ScrollView,
-  TouchableOpacity,
-  TextInput,
-  Modal,
   ActivityIndicator,
-  RefreshControl,
   Alert,
   Image,
+  Keyboard,
   KeyboardAvoidingView,
+  Modal,
   Platform,
+  RefreshControl,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
 } from 'react-native';
 import {
+  getMediaFileUrl,
+  getOwnedImageUri,
   operate,
   uploadMediaFile,
-  getOwnedImageUri,
-  getMediaFileUrl,
 } from '../../api/client';
 import { useAuthStore } from '../../store';
 import {
@@ -32,7 +45,19 @@ import {
   CommunityOverview,
   CommunityPost,
   CommunityPrivacy,
+  NoticeCategory,
 } from '../../store/types/adoption';
+
+type DraftPostImage = {
+  asset: ImagePicker.ImagePickerAsset;
+  uploadedFileId?: string;
+};
+
+type ReplyTarget = {
+  id: string;
+  authorName: string;
+  snippet: string;
+};
 
 /** Safely normalizes `imageFileIds` whether the backend returns an array or a JSON string */
 function parseImageFileIds(raw: unknown): string[] {
@@ -56,6 +81,23 @@ function parseImageFileIds(raw: unknown): string[] {
   return [];
 }
 
+/** Applies an optimistic vote toggle (+1 / -1) to a post or comment item */
+function applyOptimisticVote<
+  T extends { upvotes?: number; downvotes?: number; score?: number; myVote?: number },
+>(item: T, clickedValue: 1 | -1): T {
+  const prevVote = Number(item.myVote || 0);
+  const nextVote = prevVote === clickedValue ? 0 : clickedValue;
+  const upDelta = (nextVote === 1 ? 1 : 0) - (prevVote === 1 ? 1 : 0);
+  const downDelta = (nextVote === -1 ? 1 : 0) - (prevVote === -1 ? 1 : 0);
+  return {
+    ...item,
+    myVote: nextVote as -1 | 0 | 1,
+    upvotes: Math.max(0, Number(item.upvotes || 0) + upDelta),
+    downvotes: Math.max(0, Number(item.downvotes || 0) + downDelta),
+    score: Number(item.score || 0) + (nextVote - prevVote),
+  };
+}
+
 /**
  * Resolves a 5-minute signed URL from `communityImageToken`, with fallback to
  * authenticated SDK binary download (`getOwnedImageUri`) if token view requires session headers.
@@ -63,18 +105,31 @@ function parseImageFileIds(raw: unknown): string[] {
 function SignedCommunityImage({
   postId,
   fileId,
+  index,
+  total,
   styles,
+  accentColor,
+  secondaryColor,
+  onPreview,
 }: {
   postId: string;
   fileId: string;
+  index: number;
+  total: number;
   styles: any;
+  accentColor: string;
+  secondaryColor: string;
+  onPreview?: (uri: string) => void;
 }) {
   const [resolvedUri, setResolvedUri] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
+  const [retrySeed, setRetrySeed] = useState(0);
+  const mountedRef = useRef(true);
 
   useEffect(() => {
-    let mounted = true;
+    mountedRef.current = true;
     setFailed(false);
+    setResolvedUri(null);
 
     (async () => {
       try {
@@ -83,7 +138,7 @@ function SignedCommunityImage({
           { postId, fileId }
         );
         const tokenUrl = res?.url || res?.viewUrl;
-        if (mounted && tokenUrl) {
+        if (mountedRef.current && tokenUrl) {
           setResolvedUri(tokenUrl);
           return;
         }
@@ -91,60 +146,82 @@ function SignedCommunityImage({
         // Fallback below if token action fails
       }
 
-      // Fallback 1: Authenticated local cache via Appwrite Storage SDK
       const localUri = await getOwnedImageUri(fileId);
-      if (mounted && localUri) {
+      if (mountedRef.current && localUri) {
         setResolvedUri(localUri);
         return;
       }
 
-      // Fallback 2: Standard storage view URL
       const directUrl = getMediaFileUrl(fileId);
-      if (mounted && directUrl) {
+      if (mountedRef.current && directUrl) {
         setResolvedUri(directUrl);
-      } else if (mounted) {
+      } else if (mountedRef.current) {
         setFailed(true);
       }
     })();
 
     return () => {
-      mounted = false;
+      mountedRef.current = false;
     };
-  }, [postId, fileId]);
+  }, [postId, fileId, retrySeed]);
 
   if (failed) {
     return (
-      <View style={styles.imageTokenPlaceholder}>
-        <Text style={{ fontSize: 10, color: '#64748B', textAlign: 'center' }}>
-          Image unavailable
+      <TouchableOpacity
+        style={styles.imageTokenPlaceholder}
+        onPress={() => setRetrySeed((s) => s + 1)}
+        activeOpacity={0.75}
+      >
+        <Text
+          style={{
+            fontSize: 11,
+            color: secondaryColor,
+            textAlign: 'center',
+            fontWeight: '600',
+          }}
+        >
+          Image unavailable{'\n'}Tap to retry
         </Text>
-      </View>
+      </TouchableOpacity>
     );
   }
 
   if (!resolvedUri) {
     return (
       <View style={styles.imageTokenPlaceholder}>
-        <ActivityIndicator size="small" color="#00AEEF" />
+        <ActivityIndicator size="small" color={accentColor} />
       </View>
     );
   }
 
   return (
-    <Image
-      source={{ uri: resolvedUri }}
-      style={styles.postAttachedImage}
-      resizeMode="cover"
-      onError={async () => {
-        // If HTTP signed URL fails due to missing session cookie, try SDK binary download
-        const backup = await getOwnedImageUri(fileId);
-        if (backup && backup !== resolvedUri) {
-          setResolvedUri(backup);
-        } else {
-          setFailed(true);
-        }
-      }}
-    />
+    <TouchableOpacity
+      activeOpacity={0.88}
+      onPress={() => onPreview?.(resolvedUri)}
+      style={styles.postImageTouchWrap}
+    >
+      <Image
+        source={{ uri: resolvedUri }}
+        style={styles.postAttachedImage}
+        resizeMode="cover"
+        onError={async () => {
+          const backup = await getOwnedImageUri(fileId);
+          if (!mountedRef.current) return;
+          if (backup && backup !== resolvedUri) {
+            setResolvedUri(backup);
+          } else {
+            setFailed(true);
+          }
+        }}
+      />
+      {total > 1 && (
+        <View style={styles.imageCounterBadge}>
+          <Text style={styles.imageCounterText}>
+            {index + 1}/{total}
+          </Text>
+        </View>
+      )}
+    </TouchableOpacity>
   );
 }
 
@@ -200,8 +277,28 @@ function isOfficialStaffAuthor(
 export default function CommunityScreen() {
   const styles = useThemedStyles(baseStyles);
   const colors = useAppPalette();
-  const route = useRoute<any>();
+  const isDark = useAuthStore((s) => s.user?.theme === 'dark');
   const { user } = useAuthStore();
+  const navigation = useNavigation<any>();
+  const route = useRoute<any>();
+
+  const semantic = useMemo(
+    () => ({
+      dangerBg: isDark ? '#3F1D24' : '#FEE2E2',
+      dangerBorder: isDark ? '#7F1D1D' : '#FCA5A5',
+      successText: isDark ? '#4ADE80' : '#15803D',
+      successBg: isDark ? '#143322' : '#DCFCE7',
+      successBorder: isDark ? '#166534' : '#86EFAC',
+      warningText: isDark ? '#FCD34D' : '#92400E',
+      warningAccent: isDark ? '#FBBF24' : '#B45309',
+      warningBg: isDark ? '#33250B' : '#FEF3C7',
+      warningBorder: isDark ? '#92400E' : '#F59E0B',
+      bannerBg: isDark ? '#172438' : '#1E293B',
+      bannerSub: isDark ? '#ABBBD0' : '#CBD5E1',
+    }),
+    [isDark]
+  );
+
   const [overviewRole, setOverviewRole] = useState<
     'owner' | 'officer' | 'admin' | null
   >(null);
@@ -224,19 +321,45 @@ export default function CommunityScreen() {
     'feed'
   );
   const [isLoading, setIsLoading] = useState(false);
+  const [isLoadingPosts, setIsLoadingPosts] = useState(false);
+  const [feedError, setFeedError] = useState<string | null>(null);
+  const [postsError, setPostsError] = useState<string | null>(null);
 
   // Overview state
   const [channels, setChannels] = useState<CommunityChannel[]>([]);
   const [notices, setNotices] = useState<CommunityNotice[]>([]);
+  const [noticeFilter, setNoticeFilter] = useState<'all' | NoticeCategory>(
+    'all'
+  );
   const [selectedChannel, setSelectedChannel] =
     useState<CommunityChannel | null>(null);
   const selectedChannelRef = useRef<CommunityChannel | null>(null);
   selectedChannelRef.current = selectedChannel;
   const [channelPosts, setChannelPosts] = useState<CommunityPost[]>([]);
+  const hasLoadedOnceRef = useRef(false);
+  const channelReqSeqRef = useRef(0);
 
-  // Search state (`communitySearch`)
+  // Search state (`communitySearch`) — keep searchChannels separate from full directory!
   const [searchQuery, setSearchQuery] = useState('');
+  const [activeSearchTerm, setActiveSearchTerm] = useState('');
   const [searchPosts, setSearchPosts] = useState<CommunityPost[] | null>(null);
+  const [searchChannels, setSearchChannels] = useState<
+    CommunityChannel[] | null
+  >(null);
+  const [isSearching, setIsSearching] = useState(false);
+
+  // Per-action loading / double-submit guards
+  const [votingTargets, setVotingTargets] = useState<Record<string, boolean>>(
+    {}
+  );
+  const [busyChannelActionId, setBusyChannelActionId] = useState<string | null>(
+    null
+  );
+  const [deletingPostId, setDeletingPostId] = useState<string | null>(null);
+  const [deletingCommentId, setDeletingCommentId] = useState<string | null>(
+    null
+  );
+  const [reviewingReqId, setReviewingReqId] = useState<string | null>(null);
 
   // Create Channel Modal (`communityCreateChannel`)
   const [isCreateChannelVisible, setIsCreateChannelVisible] = useState(false);
@@ -251,23 +374,33 @@ export default function CommunityScreen() {
   const [postKind, setPostKind] = useState<'discussion' | 'announcement'>(
     'discussion'
   );
+  const [postTargetChannelId, setPostTargetChannelId] = useState<string>('');
   const [postTitle, setPostTitle] = useState('');
   const [postBody, setPostBody] = useState('');
-  const [postImages, setPostImages] = useState<ImagePicker.ImagePickerAsset[]>(
-    []
-  );
+  const [postImages, setPostImages] = useState<DraftPostImage[]>([]);
 
   // Post Comments & Replies Modal (`communityComments`, `communityCreateComment`)
   const [activePostForComments, setActivePostForComments] =
     useState<CommunityPost | null>(null);
   const [comments, setComments] = useState<CommunityComment[]>([]);
   const [newCommentBody, setNewCommentBody] = useState('');
-  const [replyToCommentId, setReplyToCommentId] = useState<string>('');
+  const [replyToComment, setReplyToComment] = useState<ReplyTarget | null>(
+    null
+  );
   const [loadingComments, setLoadingComments] = useState(false);
+  const [commentsError, setCommentsError] = useState<string | null>(null);
+  const commentsScrollRef = useRef<ComponentRef<typeof ScrollView>>(null);
+  const commentInputRef = useRef<ComponentRef<typeof TextInput>>(null);
 
   // Channel Creator Join Requests Modal (`communityJoinRequests`, `communityReviewJoin`)
   const [isJoinReqModalVisible, setIsJoinReqModalVisible] = useState(false);
+  const [joinReqChannel, setJoinReqChannel] = useState<CommunityChannel | null>(
+    null
+  );
   const [joinRequests, setJoinRequests] = useState<ChannelJoinRequest[]>([]);
+
+  // Fullscreen image viewer
+  const [previewImageUri, setPreviewImageUri] = useState<string | null>(null);
 
   const normalizePosts = (rawPosts: any[]): CommunityPost[] => {
     if (!Array.isArray(rawPosts)) return [];
@@ -281,137 +414,231 @@ export default function CommunityScreen() {
     }));
   };
 
+  const writableChannels = useMemo(
+    () =>
+      channels.filter(
+        (c) => c.canRead || c.privacy === 'public' || isOfficer
+      ),
+    [channels, isOfficer]
+  );
+
   const loadChannelPosts = useCallback(
-    async (channel: CommunityChannel) => {
+    async (channel: CommunityChannel, silent = false) => {
+      const reqId = ++channelReqSeqRef.current;
       setSelectedChannel(channel);
+      setPostsError(null);
       if (!channel.canRead && channel.privacy === 'private' && !isOfficer) {
         setChannelPosts([]);
+        setIsLoadingPosts(false);
         return;
+      }
+      if (!silent) {
+        setIsLoadingPosts(true);
       }
       try {
         const res = await operate<{
           channel?: CommunityChannel;
           posts?: CommunityPost[];
         }>('communityChannel', { channelId: channel.id });
+        if (channelReqSeqRef.current !== reqId) return;
         setChannelPosts(normalizePosts(res?.posts || []));
-      } catch (error) {
+      } catch (error: any) {
+        if (channelReqSeqRef.current !== reqId) return;
         console.warn('communityChannel warning:', error);
-        setChannelPosts([]);
+        if (!silent) {
+          setPostsError(
+            error?.message || 'Could not load discussions for this channel.'
+          );
+          setChannelPosts([]);
+        }
+      } finally {
+        if (channelReqSeqRef.current === reqId && !silent) {
+          setIsLoadingPosts(false);
+        }
       }
     },
     [isOfficer]
   );
 
-  const fetchCommunityData = useCallback(async () => {
-    setIsLoading(true);
-    try {
-      const [overviewRes, noticesRes] = await Promise.all([
-        operate<CommunityOverview>('communityOverview', {}),
-        operate<{ notices?: CommunityNotice[] }>(
-          'communityOfficialNotices',
-          {}
-        ).catch(() => ({ notices: [] })),
-      ]);
-
-      if (overviewRes?.role) {
-        setOverviewRole(overviewRes.role);
-      }
-      if (typeof overviewRes?.verified === 'boolean') {
-        setOverviewVerified(overviewRes.verified);
-      }
-
-      const fetchedChannels = Array.isArray(overviewRes?.channels)
-        ? overviewRes.channels
-        : [];
-      setChannels(fetchedChannels);
-
-      const mergedNotices =
-        Array.isArray(noticesRes?.notices) && noticesRes.notices.length > 0
-          ? noticesRes.notices
-          : Array.isArray(overviewRes?.notices)
-          ? overviewRes.notices
-          : [];
-      setNotices(mergedNotices);
-
-      const requestedChannelId = route?.params?.channelId
-        ? String(route.params.channelId)
-        : '';
-      const requestedPostId = route?.params?.postId
-        ? String(route.params.postId)
-        : '';
-      const requestedTab = route?.params?.tab as
-        | 'feed'
-        | 'channels'
-        | 'notices'
-        | undefined;
-
-      if (requestedTab) {
-        setActiveTab(requestedTab);
-      } else if (requestedChannelId || requestedPostId) {
-        setActiveTab('feed');
-      }
-
-      const currentSelected = selectedChannelRef.current;
-      let channelToLoad: CommunityChannel | undefined;
-
-      if (requestedChannelId) {
-        channelToLoad = fetchedChannels.find(
-          (c) => String(c.id) === requestedChannelId
-        );
-      }
-      if (!channelToLoad && currentSelected) {
-        channelToLoad = fetchedChannels.find(
-          (c) => c.id === currentSelected.id
-        );
-      }
-      if (!channelToLoad) {
-        channelToLoad = fetchedChannels.find(
-          (c) => c.privacy === 'public' || c.canRead
-        );
-      }
-
-      if (channelToLoad) {
-        setSelectedChannel(channelToLoad);
-        if (
-          !channelToLoad.canRead &&
-          channelToLoad.privacy === 'private' &&
-          !isOfficer
-        ) {
-          setChannelPosts([]);
-        } else {
-          try {
-            const res = await operate<{
-              channel?: CommunityChannel;
-              posts?: CommunityPost[];
-            }>('communityChannel', { channelId: channelToLoad.id });
-            const posts = normalizePosts(res?.posts || []);
-            setChannelPosts(posts);
-            if (requestedPostId) {
-              const targetPost = posts.find(
-                (p) => String(p.id) === requestedPostId
-              );
-              if (targetPost) {
-                openCommentsModal(targetPost);
-              }
-            }
-          } catch (error) {
-            console.warn('communityChannel warning:', error);
-            setChannelPosts([]);
-          }
+  const openCommentsModal = useCallback(
+    async (post: CommunityPost, silent = false) => {
+      const isDifferentPost = activePostForComments?.id !== post.id;
+      setActivePostForComments(post);
+      if (!silent) {
+        setReplyToComment(null);
+        setCommentsError(null);
+        setLoadingComments(true);
+        if (isDifferentPost) {
+          setNewCommentBody('');
+          setComments([]);
         }
       }
-    } catch (error) {
-      console.warn('communityOverview error:', error);
-    } finally {
-      setIsLoading(false);
-    }
-  }, [
-    loadChannelPosts,
-    isOfficer,
-    route?.params?.channelId,
-    route?.params?.postId,
-    route?.params?.tab,
-  ]);
+      try {
+        const res = await operate<{
+          post?: CommunityPost;
+          comments?: CommunityComment[];
+        }>('communityComments', { postId: post.id });
+        const rawComments = Array.isArray(res?.comments) ? res.comments : [];
+        setComments(
+          rawComments.map((c: any) => ({
+            ...c,
+            id: String(c.id || c.$id || ''),
+            authorRole: c.authorRole || c.role || c.accountType || undefined,
+            accountType: c.accountType || c.authorRole || c.role || undefined,
+            isOfficial: Boolean(c.isOfficial),
+          }))
+        );
+        if (res?.post) {
+          setActivePostForComments((prev) =>
+            prev && prev.id === post.id ? { ...prev, ...res.post } : prev
+          );
+        }
+      } catch (err: any) {
+        if (!silent) {
+          setCommentsError(err?.message || 'Could not load comments.');
+          setComments([]);
+        }
+      } finally {
+        if (!silent) setLoadingComments(false);
+      }
+    },
+    [activePostForComments?.id]
+  );
+
+  const fetchCommunityData = useCallback(
+    async (silent = false) => {
+      if (!silent) {
+        setIsLoading(true);
+        setFeedError(null);
+      }
+      try {
+        const [overviewRes, noticesRes] = await Promise.all([
+          operate<CommunityOverview>('communityOverview', {}),
+          operate<{ notices?: CommunityNotice[] }>(
+            'communityOfficialNotices',
+            {}
+          ).catch(() => ({ notices: [] })),
+        ]);
+
+        if (overviewRes?.role) {
+          setOverviewRole(overviewRes.role);
+        }
+        if (typeof overviewRes?.verified === 'boolean') {
+          setOverviewVerified(overviewRes.verified);
+        }
+
+        const fetchedChannels = Array.isArray(overviewRes?.channels)
+          ? overviewRes.channels
+          : [];
+        setChannels(fetchedChannels);
+
+        const mergedNotices =
+          Array.isArray(noticesRes?.notices) && noticesRes.notices.length > 0
+            ? noticesRes.notices
+            : Array.isArray(overviewRes?.notices)
+            ? overviewRes.notices
+            : [];
+        setNotices(mergedNotices);
+
+        const requestedChannelId = route?.params?.channelId
+          ? String(route.params.channelId)
+          : '';
+        const requestedPostId = route?.params?.postId
+          ? String(route.params.postId)
+          : '';
+        const requestedTab = route?.params?.tab as
+          | 'feed'
+          | 'channels'
+          | 'notices'
+          | undefined;
+
+        if (!silent) {
+          if (requestedTab) {
+            setActiveTab(requestedTab);
+          } else if (requestedChannelId || requestedPostId) {
+            setActiveTab('feed');
+          }
+        }
+
+        const currentSelected = selectedChannelRef.current;
+        let channelToLoad: CommunityChannel | undefined;
+
+        if (!silent && requestedChannelId) {
+          channelToLoad = fetchedChannels.find(
+            (c) => String(c.id) === requestedChannelId
+          );
+        }
+        if (!channelToLoad && currentSelected) {
+          channelToLoad = fetchedChannels.find(
+            (c) => c.id === currentSelected.id
+          );
+        }
+        if (!channelToLoad) {
+          channelToLoad =
+            fetchedChannels.find((c) => c.privacy === 'public' || c.canRead) ||
+            fetchedChannels[0];
+        }
+
+        if (channelToLoad) {
+          const reqId = ++channelReqSeqRef.current;
+          setSelectedChannel(channelToLoad);
+          setPostsError(null);
+          if (
+            !channelToLoad.canRead &&
+            channelToLoad.privacy === 'private' &&
+            !isOfficer
+          ) {
+            setChannelPosts([]);
+          } else {
+            try {
+              const res = await operate<{
+                channel?: CommunityChannel;
+                posts?: CommunityPost[];
+              }>('communityChannel', { channelId: channelToLoad.id });
+              if (channelReqSeqRef.current === reqId) {
+                const posts = normalizePosts(res?.posts || []);
+                setChannelPosts(posts);
+                if (!silent && requestedPostId) {
+                  const targetPost = posts.find(
+                    (p) => String(p.id) === requestedPostId
+                  );
+                  if (targetPost) {
+                    openCommentsModal(targetPost);
+                  }
+                }
+              }
+            } catch (error: any) {
+              console.warn('communityChannel warning:', error);
+              if (channelReqSeqRef.current === reqId && !silent) {
+                setPostsError(
+                  error?.message || 'Could not load channel discussions.'
+                );
+                setChannelPosts([]);
+              }
+            }
+          }
+        } else {
+          setSelectedChannel(null);
+          setChannelPosts([]);
+        }
+        hasLoadedOnceRef.current = true;
+      } catch (error: any) {
+        console.warn('communityOverview error:', error);
+        if (!silent) {
+          setFeedError(error?.message || 'Could not connect to Community Hub.');
+        }
+      } finally {
+        if (!silent) setIsLoading(false);
+      }
+    },
+    [
+      isOfficer,
+      openCommentsModal,
+      route?.params?.channelId,
+      route?.params?.postId,
+      route?.params?.tab,
+    ]
+  );
 
   useEffect(() => {
     if (
@@ -419,7 +646,7 @@ export default function CommunityScreen() {
       route?.params?.postId ||
       route?.params?.tab
     ) {
-      fetchCommunityData();
+      fetchCommunityData(false);
     }
   }, [
     route?.params?.channelId,
@@ -430,31 +657,75 @@ export default function CommunityScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      fetchCommunityData();
+      fetchCommunityData(hasLoadedOnceRef.current);
     }, [fetchCommunityData])
   );
 
-  const handleSearch = async () => {
-    const q = searchQuery.trim();
+  useLiveSync(
+    () => {
+      fetchCommunityData(true);
+      if (activePostForComments) {
+        openCommentsModal(activePostForComments, true);
+      }
+    },
+    {
+      enabled:
+        !isCreateChannelVisible &&
+        !isCreatePostVisible &&
+        !isJoinReqModalVisible &&
+        !previewImageUri,
+    }
+  );
+
+  const clearSearch = useCallback(() => {
+    setSearchQuery('');
+    setActiveSearchTerm('');
+    setSearchPosts(null);
+    setSearchChannels(null);
+    Keyboard.dismiss();
+  }, []);
+
+  const handleSearch = async (termOverride?: string) => {
+    const q = (typeof termOverride === 'string' ? termOverride : searchQuery).trim();
     if (q.length < 2) {
+      setActiveSearchTerm('');
       setSearchPosts(null);
+      setSearchChannels(null);
+      if (q.length > 0) {
+        Alert.alert('Search Tip', 'Enter at least 2 characters to search.');
+      }
       return;
     }
-    setIsLoading(true);
+    Keyboard.dismiss();
+    setIsSearching(true);
     try {
       const res = await operate<{
         channels?: CommunityChannel[];
         posts?: CommunityPost[];
       }>('communitySearch', { query: q.slice(0, 80) });
-      if (Array.isArray(res?.channels) && res.channels.length > 0) {
-        setChannels(res.channels);
-      }
+      setActiveSearchTerm(q);
+      setSearchChannels(Array.isArray(res?.channels) ? res.channels : []);
       setSearchPosts(normalizePosts(res?.posts || []));
     } catch (error: any) {
       Alert.alert('Search Error', error?.message || 'Could not search.');
     } finally {
-      setIsLoading(false);
+      setIsSearching(false);
     }
+  };
+
+  const handleRefresh = async () => {
+    await fetchCommunityData(false);
+    if (activeSearchTerm.length >= 2) {
+      await handleSearch(activeSearchTerm);
+    }
+  };
+
+  const resetCreateChannelModal = () => {
+    if (isSubmitting) return;
+    setIsCreateChannelVisible(false);
+    setNewChannelName('');
+    setNewChannelDesc('');
+    setNewChannelPrivacy('public');
   };
 
   const handleCreateChannel = async () => {
@@ -480,7 +751,8 @@ export default function CommunityScreen() {
       setIsCreateChannelVisible(false);
       setNewChannelName('');
       setNewChannelDesc('');
-      await fetchCommunityData();
+      setNewChannelPrivacy('public');
+      await fetchCommunityData(false);
       Alert.alert('Channel Created', 'Your new channel is now live!');
     } catch (error: any) {
       Alert.alert(
@@ -493,27 +765,104 @@ export default function CommunityScreen() {
   };
 
   const handleToggleChannelPrivacy = async (channel: CommunityChannel) => {
+    if (busyChannelActionId) return;
     const nextPrivacy: CommunityPrivacy =
       channel.privacy === 'public' ? 'private' : 'public';
+    setBusyChannelActionId(channel.id);
     try {
       await operate('communitySetPrivacy', {
         channelId: channel.id,
         privacy: nextPrivacy,
       });
-      await fetchCommunityData();
+      setChannels((prev) =>
+        prev.map((c) =>
+          c.id === channel.id ? { ...c, privacy: nextPrivacy } : c
+        )
+      );
+      setSearchChannels((prev) =>
+        prev
+          ? prev.map((c) =>
+              c.id === channel.id ? { ...c, privacy: nextPrivacy } : c
+            )
+          : null
+      );
+      if (selectedChannel?.id === channel.id) {
+        setSelectedChannel((prev) =>
+          prev ? { ...prev, privacy: nextPrivacy } : prev
+        );
+      }
+      await fetchCommunityData(true);
       Alert.alert(
         'Privacy Updated',
         `Channel is now ${nextPrivacy.toUpperCase()}.`
       );
     } catch (error: any) {
       Alert.alert('Error', error?.message || 'Could not change privacy.');
+    } finally {
+      setBusyChannelActionId(null);
     }
   };
 
+  const handleDeleteChannel = (channel: CommunityChannel) => {
+    if (busyChannelActionId) return;
+    Alert.alert(
+      'Delete Channel?',
+      `Are you sure you want to delete "#${channel.name}" and all of its discussions?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete Channel',
+          style: 'destructive',
+          onPress: async () => {
+            setBusyChannelActionId(channel.id);
+            try {
+              await operate('communityDeleteChannel', {
+                channelId: channel.id,
+              });
+              setSelectedChannel(null);
+              selectedChannelRef.current = null;
+              await fetchCommunityData(false);
+              Alert.alert(
+                'Channel Deleted',
+                `"#${channel.name}" has been deleted.`
+              );
+            } catch (error: any) {
+              Alert.alert(
+                'Error',
+                error?.message || 'Could not delete channel.'
+              );
+            } finally {
+              setBusyChannelActionId(null);
+            }
+          },
+        },
+      ]
+    );
+  };
+
   const handleRequestJoinPrivate = async (channel: CommunityChannel) => {
+    if (busyChannelActionId) return;
+    setBusyChannelActionId(channel.id);
     try {
       await operate('communityRequestJoin', { channelId: channel.id });
-      await fetchCommunityData();
+      setChannels((prev) =>
+        prev.map((c) =>
+          c.id === channel.id ? { ...c, membership: 'pending' } : c
+        )
+      );
+      setSearchChannels((prev) =>
+        prev
+          ? prev.map((c) =>
+              c.id === channel.id ? { ...c, membership: 'pending' } : c
+            )
+          : null
+      );
+      if (selectedChannel?.id === channel.id) {
+        setSelectedChannel((prev) =>
+          prev ? { ...prev, membership: 'pending' } : prev
+        );
+      }
+      await fetchCommunityData(true);
       Alert.alert(
         'Join Request Sent',
         `Your request to join "${channel.name}" is pending approval by the channel creator.`
@@ -523,15 +872,20 @@ export default function CommunityScreen() {
         'Request Failed',
         error?.message || 'Could not request membership.'
       );
+    } finally {
+      setBusyChannelActionId(null);
     }
   };
 
   const handleOpenJoinRequests = async (channel: CommunityChannel) => {
+    if (busyChannelActionId) return;
+    setBusyChannelActionId(channel.id);
     try {
       const res = await operate<{ requests?: ChannelJoinRequest[] }>(
         'communityJoinRequests',
         { channelId: channel.id }
       );
+      setJoinReqChannel(channel);
       setJoinRequests(Array.isArray(res?.requests) ? res.requests : []);
       setIsJoinReqModalVisible(true);
     } catch (error: any) {
@@ -539,6 +893,8 @@ export default function CommunityScreen() {
         'Error',
         error?.message || 'Could not load channel join requests.'
       );
+    } finally {
+      setBusyChannelActionId(null);
     }
   };
 
@@ -546,22 +902,44 @@ export default function CommunityScreen() {
     membershipId: string,
     status: 'approved' | 'rejected'
   ) => {
-    if (!selectedChannel) return;
+    const targetChannel = joinReqChannel || selectedChannel;
+    if (!targetChannel || reviewingReqId) return;
+    setReviewingReqId(membershipId);
     try {
       await operate('communityReviewJoin', {
-        channelId: selectedChannel.id,
+        channelId: targetChannel.id,
         membershipId,
         status,
       });
-      const res = await operate<{ requests?: ChannelJoinRequest[] }>(
-        'communityJoinRequests',
-        { channelId: selectedChannel.id }
-      );
-      setJoinRequests(Array.isArray(res?.requests) ? res.requests : []);
+      setJoinRequests((prev) => prev.filter((r) => r.id !== membershipId));
       Alert.alert('Updated', `Membership request ${status}.`);
     } catch (error: any) {
       Alert.alert('Error', error?.message || 'Could not review join request.');
+    } finally {
+      setReviewingReqId(null);
     }
+  };
+
+  const openCreatePostModal = (kind: 'discussion' | 'announcement') => {
+    const fallbackChannel =
+      (selectedChannel &&
+      (selectedChannel.canRead ||
+        selectedChannel.privacy === 'public' ||
+        isOfficer)
+        ? selectedChannel
+        : writableChannels[0]) || null;
+    setPostKind(kind);
+    setPostTargetChannelId(fallbackChannel?.id || '');
+    setIsCreatePostVisible(true);
+  };
+
+  const resetCreatePostModal = () => {
+    if (isSubmitting) return;
+    setIsCreatePostVisible(false);
+    setPostKind('discussion');
+    setPostTitle('');
+    setPostBody('');
+    setPostImages([]);
   };
 
   const handlePickPostImage = async () => {
@@ -574,7 +952,9 @@ export default function CommunityScreen() {
       quality: 0.75,
     });
     if (!result.canceled && result.assets.length > 0) {
-      setPostImages((prev) => [...prev, result.assets[0]].slice(0, 4));
+      setPostImages((prev) =>
+        [...prev, { asset: result.assets[0] }].slice(0, 4)
+      );
     }
   };
 
@@ -587,11 +967,11 @@ export default function CommunityScreen() {
       return;
     }
     const targetChannel =
+      writableChannels.find((c) => c.id === postTargetChannelId) ||
       selectedChannel ||
-      channels.find((c) => c.privacy === 'public' || c.canRead) ||
-      channels[0] ||
+      writableChannels[0] ||
       null;
-    if (!targetChannel && !(isOfficer && postKind === 'announcement')) {
+    if (!targetChannel) {
       Alert.alert('Select a Channel', 'Please choose a channel first.');
       return;
     }
@@ -608,67 +988,46 @@ export default function CommunityScreen() {
         : cleanTitle;
 
     setIsSubmitting(true);
+    const updatedDrafts = [...postImages];
     try {
       const uploadedIds: string[] = [];
-      for (const asset of postImages) {
-        const fid = await uploadMediaFile(asset);
-        uploadedIds.push(fid);
-      }
-
-      if (targetChannel) {
-        await operate('communityCreatePost', {
-          channelId: targetChannel.id,
-          title: formattedTitle,
-          body: postBody.trim(),
-          imageFileIds: uploadedIds,
-          authorRole: isOfficer ? 'officer' : 'owner',
-          accountType: isOfficer ? 'officer' : 'owner',
-          isOfficial: isOfficialPost,
-        });
-      }
-
-      if (isOfficialPost) {
-        try {
-          await operate('communityCreateAnnouncement', {
-            title: cleanTitle,
-            body: postBody.trim(),
-            category: 'announcement',
-            audience: 'both',
-            priority: 'info',
-            barangay: user?.barangay || 'All Barangays',
-          });
-        } catch {
-          // Fallback to local notice refresh if backend stores announcements via channel posts
+      for (let i = 0; i < updatedDrafts.length; i++) {
+        if (!updatedDrafts[i].uploadedFileId) {
+          const fid = await uploadMediaFile(updatedDrafts[i].asset);
+          updatedDrafts[i] = { ...updatedDrafts[i], uploadedFileId: fid };
         }
-        const createdNotice: CommunityNotice = {
-          id: `notice-${Date.now()}`,
-          title: cleanTitle,
-          body: postBody.trim(),
-          category: 'announcement',
-          audience: 'both',
-          priority: 'info',
-          date: new Date().toISOString(),
-          barangay: user?.barangay || 'All Barangays',
-          isActive: true,
-        };
-        setNotices((prev) => [createdNotice, ...prev]);
+        uploadedIds.push(updatedDrafts[i].uploadedFileId!);
       }
+
+      await operate('communityCreatePost', {
+        channelId: targetChannel.id,
+        title: formattedTitle,
+        body: postBody.trim(),
+        imageFileIds: uploadedIds,
+        authorRole: isOfficer ? 'officer' : 'owner',
+        accountType: isOfficer ? 'officer' : 'owner',
+        isOfficial: isOfficialPost,
+      });
 
       setIsCreatePostVisible(false);
       setPostKind('discussion');
       setPostTitle('');
       setPostBody('');
       setPostImages([]);
-      if (targetChannel) {
-        await loadChannelPosts(targetChannel);
+      if (activeSearchTerm) {
+        clearSearch();
       }
+      setActiveTab('feed');
+      await loadChannelPosts(targetChannel, false);
       Alert.alert(
-        'Saved successfully',
+        'Published',
         isOfficialPost
-          ? 'Your official announcement has been published.'
-          : 'Your community post has been published.'
+          ? `Your official announcement post was published in #${targetChannel.name}.`
+          : `Your discussion post was published in #${targetChannel.name}.`
       );
     } catch (error: any) {
+      // Preserve any already-uploaded file IDs so retry doesn't duplicate uploads
+      setPostImages(updatedDrafts);
       Alert.alert('Post Failed', error?.message || 'Could not publish post.');
     } finally {
       setIsSubmitting(false);
@@ -676,24 +1035,38 @@ export default function CommunityScreen() {
   };
 
   const handleDeletePost = (postId: string) => {
+    if (deletingPostId) return;
     Alert.alert(
       'Delete Post?',
       'Are you sure you want to delete your discussion post?',
       [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Delete',
-        style: 'destructive',
-        onPress: async () => {
-          try {
-            await operate('communityDeletePost', { postId });
-            if (selectedChannel) await loadChannelPosts(selectedChannel);
-          } catch (error: any) {
-            Alert.alert('Error', error?.message || 'Could not delete post.');
-          }
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            const prevChannelPosts = channelPosts;
+            const prevSearchPosts = searchPosts;
+            setDeletingPostId(postId);
+            // Optimistically remove from both channel feed and active search results
+            setChannelPosts((prev) => prev.filter((p) => p.id !== postId));
+            setSearchPosts((prev) =>
+              prev ? prev.filter((p) => p.id !== postId) : null
+            );
+            try {
+              await operate('communityDeletePost', { postId });
+              if (selectedChannel) await loadChannelPosts(selectedChannel, true);
+            } catch (error: any) {
+              setChannelPosts(prevChannelPosts);
+              setSearchPosts(prevSearchPosts);
+              Alert.alert('Error', error?.message || 'Could not delete post.');
+            } finally {
+              setDeletingPostId(null);
+            }
+          },
         },
-      },
-    ]);
+      ]
+    );
   };
 
   const handleVote = async (
@@ -708,41 +1081,50 @@ export default function CommunityScreen() {
       );
       return;
     }
+    const key = `${targetType}:${targetId}`;
+    if (votingTargets[key]) return;
+    setVotingTargets((prev) => ({ ...prev, [key]: true }));
+
+    // Snapshot for rollback on error
+    const prevChannelPosts = channelPosts;
+    const prevSearchPosts = searchPosts;
+    const prevComments = comments;
+
+    if (targetType === 'post') {
+      setChannelPosts((prev) =>
+        prev.map((p) => (p.id === targetId ? applyOptimisticVote(p, value) : p))
+      );
+      setSearchPosts((prev) =>
+        prev
+          ? prev.map((p) =>
+              p.id === targetId ? applyOptimisticVote(p, value) : p
+            )
+          : null
+      );
+    } else {
+      setComments((prev) =>
+        prev.map((c) => (c.id === targetId ? applyOptimisticVote(c, value) : c))
+      );
+    }
+
     try {
       await operate('communityVote', { targetType, targetId, value });
       if (targetType === 'post' && selectedChannel) {
-        await loadChannelPosts(selectedChannel);
+        loadChannelPosts(selectedChannel, true);
       } else if (targetType === 'comment' && activePostForComments) {
-        await openCommentsModal(activePostForComments);
+        openCommentsModal(activePostForComments, true);
       }
     } catch (error: any) {
+      setChannelPosts(prevChannelPosts);
+      setSearchPosts(prevSearchPosts);
+      setComments(prevComments);
       Alert.alert('Vote Error', error?.message || 'Could not submit vote.');
-    }
-  };
-
-  const openCommentsModal = async (post: CommunityPost) => {
-    setActivePostForComments(post);
-    setReplyToCommentId('');
-    setLoadingComments(true);
-    try {
-      const res = await operate<{
-        post?: CommunityPost;
-        comments?: CommunityComment[];
-      }>('communityComments', { postId: post.id });
-      const rawComments = Array.isArray(res?.comments) ? res.comments : [];
-      setComments(
-        rawComments.map((c: any) => ({
-          ...c,
-          id: String(c.id || c.$id || ''),
-          authorRole: c.authorRole || c.role || c.accountType || undefined,
-          accountType: c.accountType || c.authorRole || c.role || undefined,
-          isOfficial: Boolean(c.isOfficial),
-        }))
-      );
-    } catch {
-      setComments([]);
     } finally {
-      setLoadingComments(false);
+      setVotingTargets((prev) => {
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
     }
   };
 
@@ -754,21 +1136,49 @@ export default function CommunityScreen() {
       );
       return;
     }
-    if (!activePostForComments || !newCommentBody.trim()) return;
+    if (!activePostForComments || !newCommentBody.trim() || isSubmitting) return;
+
+    const targetPost = activePostForComments;
+    const bodyText = newCommentBody.trim();
+    const isTopLevelReply = !replyToComment;
 
     setIsSubmitting(true);
     try {
       await operate('communityCreateComment', {
-        postId: activePostForComments.id,
-        body: newCommentBody.trim(),
+        postId: targetPost.id,
+        body: bodyText,
         authorRole: isOfficer ? 'officer' : 'owner',
         accountType: isOfficer ? 'officer' : 'owner',
-        ...(replyToCommentId ? { parentCommentId: replyToCommentId } : {}),
+        ...(replyToComment ? { parentCommentId: replyToComment.id } : {}),
       });
       setNewCommentBody('');
-      setReplyToCommentId('');
-      await openCommentsModal(activePostForComments);
-      if (selectedChannel) await loadChannelPosts(selectedChannel);
+      setReplyToComment(null);
+      Keyboard.dismiss();
+
+      setChannelPosts((prev) =>
+        prev.map((p) =>
+          p.id === targetPost.id
+            ? { ...p, commentCount: Number(p.commentCount || 0) + 1 }
+            : p
+        )
+      );
+      setSearchPosts((prev) =>
+        prev
+          ? prev.map((p) =>
+              p.id === targetPost.id
+                ? { ...p, commentCount: Number(p.commentCount || 0) + 1 }
+                : p
+            )
+          : null
+      );
+
+      await openCommentsModal(targetPost, true);
+      if (selectedChannel) loadChannelPosts(selectedChannel, true);
+      if (isTopLevelReply) {
+        setTimeout(() => {
+          commentsScrollRef.current?.scrollToEnd({ animated: true });
+        }, 120);
+      }
     } catch (error: any) {
       Alert.alert('Comment Failed', error?.message || 'Could not add comment.');
     } finally {
@@ -777,100 +1187,300 @@ export default function CommunityScreen() {
   };
 
   const handleDeleteComment = async (commentId: string) => {
-    if (!activePostForComments) return;
+    if (!activePostForComments || deletingCommentId) return;
+    const targetPost = activePostForComments;
+    const prevComments = comments;
+    setDeletingCommentId(commentId);
+    setComments((prev) => prev.filter((c) => c.id !== commentId));
     try {
       await operate('communityDeleteComment', { commentId });
-      await openCommentsModal(activePostForComments);
-      if (selectedChannel) await loadChannelPosts(selectedChannel);
+      setChannelPosts((prev) =>
+        prev.map((p) =>
+          p.id === targetPost.id
+            ? { ...p, commentCount: Math.max(0, Number(p.commentCount || 0) - 1) }
+            : p
+        )
+      );
+      await openCommentsModal(targetPost, true);
+      if (selectedChannel) loadChannelPosts(selectedChannel, true);
     } catch (error: any) {
+      setComments(prevComments);
       Alert.alert('Error', error?.message || 'Could not delete comment.');
+    } finally {
+      setDeletingCommentId(null);
     }
   };
 
+  const commentsById = useMemo(() => {
+    const map = new Map<string, CommunityComment>();
+    for (const c of comments) map.set(c.id, c);
+    return map;
+  }, [comments]);
+
   const displayedPosts = searchPosts !== null ? searchPosts : channelPosts;
+  const displayedChannels =
+    searchChannels !== null ? searchChannels : channels;
+
+  const filteredNotices = useMemo(() => {
+    const q = activeSearchTerm.toLowerCase();
+    return notices.filter((n) => {
+      if (noticeFilter !== 'all' && n.category !== noticeFilter) return false;
+      if (q) {
+        const hay = `${n.title} ${n.body} ${n.barangay}`.toLowerCase();
+        return hay.includes(q);
+      }
+      return true;
+    });
+  }, [notices, noticeFilter, activeSearchTerm]);
+
+  const noticeCounts = useMemo(
+    () => ({
+      all: notices.length,
+      outbreak: notices.filter((n) => n.category === 'outbreak').length,
+      advisory: notices.filter((n) => n.category === 'advisory').length,
+      announcement: notices.filter((n) => n.category === 'announcement').length,
+    }),
+    [notices]
+  );
+
+  const getChannelStatusBadge = (ch: CommunityChannel) => {
+    if (ch.isCreator) {
+      return {
+        label: 'Your Channel',
+        bg: colors.primaryMuted,
+        text: colors.primary,
+      };
+    }
+    if (ch.privacy === 'public' || ch.canRead) {
+      return {
+        label: ch.privacy === 'private' ? 'Approved Member' : 'Public Access',
+        bg: semantic.successBg,
+        text: semantic.successText,
+      };
+    }
+    if (ch.membership === 'pending') {
+      return {
+        label: 'Pending Approval',
+        bg: semantic.warningBg,
+        text: semantic.warningText,
+      };
+    }
+    if (ch.membership === 'rejected') {
+      return {
+        label: 'Request Declined',
+        bg: semantic.dangerBg,
+        text: colors.danger,
+      };
+    }
+    return {
+      label: 'Private • Locked',
+      bg: colors.surfaceMuted,
+      text: colors.secondary,
+    };
+  };
+
+  const getNoticeSeverityStyle = (
+    priority: CommunityNotice['priority'],
+    category: NoticeCategory
+  ) => {
+    if (category === 'outbreak' || priority === 'high') {
+      return {
+        bg: semantic.dangerBg,
+        text: colors.danger,
+        border: semantic.dangerBorder,
+      };
+    }
+    if (priority === 'medium') {
+      return {
+        bg: semantic.warningBg,
+        text: semantic.warningAccent,
+        border: semantic.warningBorder,
+      };
+    }
+    return {
+      bg: colors.primaryMuted,
+      text: colors.primary,
+      border: colors.border,
+    };
+  };
 
   return (
-    <View style={styles.container}>
-      {/* Read-only notice for unverified Pet Owners */}
+    <View style={[styles.container, { backgroundColor: colors.background }]}>
+      {/* Read-only notice for unverified Pet Owners with direct Verify CTA */}
       {!isVerifiedOwner && (
-        <View style={styles.readOnlyBanner}>
-          <Text style={styles.readOnlyBannerText}>
-            👀 Read-Only Mode: Verify your account in Profile &gt; ID Verify to
-            create channels, publish posts, comment, and vote.
-          </Text>
+        <View
+          style={[
+            styles.readOnlyBanner,
+            {
+              backgroundColor: semantic.warningBg,
+              borderColor: semantic.warningBorder,
+            },
+          ]}
+        >
+          <View style={styles.readOnlyBannerRow}>
+            <Text
+              style={[
+                styles.readOnlyBannerText,
+                { color: semantic.warningText, flex: 1 },
+              ]}
+            >
+              👀 Read-Only Mode: Verify your account to create channels, post,
+              comment, and vote.
+            </Text>
+            {!isOfficer && (
+              <TouchableOpacity
+                style={[
+                  styles.verifyCtaBtn,
+                  { backgroundColor: semantic.warningAccent },
+                ]}
+                onPress={() => navigation.navigate('UserProfile')}
+              >
+                <Text style={styles.verifyCtaText}>Verify Now →</Text>
+              </TouchableOpacity>
+            )}
+          </View>
         </View>
       )}
 
       {/* Search Bar */}
-      <View style={styles.searchBarRow}>
-        <TextInput
-          style={styles.searchInput}
-          placeholder="Search channels or discussions (2–80 chars)..."
-          placeholderTextColor="#94A3B8"
-          value={searchQuery}
-          onChangeText={(txt) => {
-            setSearchQuery(txt);
-            if (!txt.trim()) setSearchPosts(null);
-          }}
-          onSubmitEditing={handleSearch}
-        />
-        <TouchableOpacity style={styles.searchBtn} onPress={handleSearch}>
-          <Text style={styles.searchBtnText}>Search</Text>
+      <View
+        style={[
+          styles.searchBarRow,
+          { backgroundColor: colors.surface },
+        ]}
+      >
+        <View
+          style={[
+            styles.searchInputWrap,
+            {
+              backgroundColor: colors.background,
+              borderColor: colors.border,
+            },
+          ]}
+        >
+          <TextInput
+            style={[styles.searchInput, { color: colors.text }]}
+            placeholder="Search channels or discussions (2–80 chars)..."
+            placeholderTextColor={colors.secondary}
+            value={searchQuery}
+            onChangeText={(txt) => {
+              setSearchQuery(txt);
+              if (!txt.trim()) {
+                setActiveSearchTerm('');
+                setSearchPosts(null);
+                setSearchChannels(null);
+              }
+            }}
+            onSubmitEditing={() => handleSearch()}
+            returnKeyType="search"
+          />
+          {searchQuery.length > 0 && (
+            <TouchableOpacity
+              style={styles.searchClearBtn}
+              onPress={clearSearch}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            >
+              <Text
+                style={[styles.searchClearText, { color: colors.secondary }]}
+              >
+                ✕
+              </Text>
+            </TouchableOpacity>
+          )}
+        </View>
+        <TouchableOpacity
+          style={[
+            styles.searchBtn,
+            { backgroundColor: colors.primary },
+            isSearching && { opacity: 0.7 },
+          ]}
+          onPress={() => handleSearch()}
+          disabled={isSearching}
+        >
+          {isSearching ? (
+            <ActivityIndicator size="small" color="#FFFFFF" />
+          ) : (
+            <Text style={styles.searchBtnText}>Search</Text>
+          )}
         </TouchableOpacity>
       </View>
 
       {/* Responsive 3-Area Switcher (Discussions | Channels | Official CVO Notices) */}
-      <View style={styles.segmentRow}>
-        <TouchableOpacity
+      <View
+        style={[
+          styles.segmentWrap,
+          { backgroundColor: colors.surface, borderColor: colors.border },
+        ]}
+      >
+        <View
           style={[
-            styles.segmentBtn,
-            activeTab === 'feed' && styles.segmentBtnActive,
+            styles.segmentRow,
+            { backgroundColor: colors.surfaceMuted },
           ]}
-          onPress={() => setActiveTab('feed')}
         >
-          <Text
+          <TouchableOpacity
             style={[
-              styles.segmentText,
-              activeTab === 'feed' && styles.segmentTextActive,
+              styles.segmentBtn,
+              activeTab === 'feed' && [
+                styles.segmentBtnActive,
+                { backgroundColor: colors.surface },
+              ],
             ]}
+            onPress={() => setActiveTab('feed')}
           >
-            💬 Discussions
-          </Text>
-        </TouchableOpacity>
+            <Text
+              style={[
+                styles.segmentText,
+                { color: colors.secondary },
+                activeTab === 'feed' && { color: colors.primary },
+              ]}
+            >
+              💬 Discussions
+            </Text>
+          </TouchableOpacity>
 
-        <TouchableOpacity
-          style={[
-            styles.segmentBtn,
-            activeTab === 'channels' && styles.segmentBtnActive,
-          ]}
-          onPress={() => setActiveTab('channels')}
-        >
-          <Text
+          <TouchableOpacity
             style={[
-              styles.segmentText,
-              activeTab === 'channels' && styles.segmentTextActive,
+              styles.segmentBtn,
+              activeTab === 'channels' && [
+                styles.segmentBtnActive,
+                { backgroundColor: colors.surface },
+              ],
             ]}
+            onPress={() => setActiveTab('channels')}
           >
-            # Channels ({channels.length})
-          </Text>
-        </TouchableOpacity>
+            <Text
+              style={[
+                styles.segmentText,
+                { color: colors.secondary },
+                activeTab === 'channels' && { color: colors.primary },
+              ]}
+            >
+              # Channels ({channels.length})
+            </Text>
+          </TouchableOpacity>
 
-        <TouchableOpacity
-          style={[
-            styles.segmentBtn,
-            activeTab === 'notices' && styles.segmentBtnActive,
-          ]}
-          onPress={() => setActiveTab('notices')}
-        >
-          <Text
+          <TouchableOpacity
             style={[
-              styles.segmentText,
-              activeTab === 'notices' && styles.segmentTextActive,
+              styles.segmentBtn,
+              activeTab === 'notices' && [
+                styles.segmentBtnActive,
+                { backgroundColor: colors.surface },
+              ],
             ]}
+            onPress={() => setActiveTab('notices')}
           >
-            📢 CVO Notices ({notices.length})
-          </Text>
-        </TouchableOpacity>
+            <Text
+              style={[
+                styles.segmentText,
+                { color: colors.secondary },
+                activeTab === 'notices' && { color: colors.primary },
+              ]}
+            >
+              📢 CVO Notices ({notices.length})
+            </Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
       <ScrollView
@@ -879,52 +1489,135 @@ export default function CommunityScreen() {
         refreshControl={
           <RefreshControl
             refreshing={isLoading}
-            onRefresh={fetchCommunityData}
+            onRefresh={handleRefresh}
+            tintColor={colors.primary}
           />
         }
       >
+        {/* Global Overview Connection Error Banner */}
+        {feedError && (
+          <View
+            style={[
+              styles.errorCard,
+              {
+                backgroundColor: semantic.dangerBg,
+                borderColor: semantic.dangerBorder,
+              },
+            ]}
+          >
+            <Text style={[styles.errorCardText, { color: colors.danger }]}>
+              {feedError}
+            </Text>
+            <TouchableOpacity
+              style={[styles.retryBtn, { backgroundColor: colors.danger }]}
+              onPress={() => fetchCommunityData(false)}
+            >
+              <Text style={styles.retryBtnText}>Retry</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {/* Active Search Filter Banner */}
+        {activeSearchTerm.length >= 2 && (
+          <View
+            style={[
+              styles.searchSummaryBar,
+              {
+                backgroundColor: colors.primaryMuted,
+                borderColor: colors.primary,
+              },
+            ]}
+          >
+            <Text
+              style={[
+                styles.searchSummaryText,
+                { color: colors.text, flex: 1 },
+              ]}
+            >
+              Search "{activeSearchTerm}":{' '}
+              {activeTab === 'feed'
+                ? `${searchPosts?.length ?? 0} discussions`
+                : activeTab === 'channels'
+                ? `${displayedChannels.length} channels`
+                : `${filteredNotices.length} notices`}
+            </Text>
+            <TouchableOpacity onPress={clearSearch} style={styles.searchSummaryClear}>
+              <Text
+                style={{
+                  color: colors.primary,
+                  fontSize: 12,
+                  fontWeight: 'bold',
+                }}
+              >
+                Clear
+              </Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
         {/* AREA 1: DISCUSSIONS FEED */}
         {activeTab === 'feed' && (
           <>
             {/* Horizontal Channel Selector */}
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              style={{ marginBottom: 12 }}
-            >
-              {channels.map((ch) => {
-                const active = selectedChannel?.id === ch.id;
-                return (
-                  <TouchableOpacity
-                    key={ch.id}
-                    style={[
-                      styles.channelChip,
-                      active && styles.channelChipActive,
-                    ]}
-                    onPress={() => {
-                      setSearchPosts(null);
-                      loadChannelPosts(ch);
-                    }}
-                  >
-                    <Text
+            {searchPosts === null && (
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                style={{ marginBottom: 12 }}
+              >
+                {channels.map((ch) => {
+                  const active = selectedChannel?.id === ch.id;
+                  return (
+                    <TouchableOpacity
+                      key={ch.id}
                       style={[
-                        styles.channelChipText,
-                        active && styles.channelChipTextActive,
+                        styles.channelChip,
+                        {
+                          backgroundColor: colors.surface,
+                          borderColor: colors.border,
+                        },
+                        active && {
+                          backgroundColor: colors.primaryMuted,
+                          borderColor: colors.primary,
+                        },
                       ]}
+                      onPress={() => {
+                        setSearchPosts(null);
+                        loadChannelPosts(ch, false);
+                      }}
                     >
-                      {ch.privacy === 'private' ? '🔒 ' : '# '}
-                      {ch.name}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </ScrollView>
+                      <Text
+                        style={[
+                          styles.channelChipText,
+                          { color: colors.secondary },
+                          active && { color: colors.primary },
+                        ]}
+                      >
+                        {ch.privacy === 'private' ? '🔒 ' : '# '}
+                        {ch.name}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </ScrollView>
+            )}
 
             {/* Active Channel Header & Actions */}
-            {selectedChannel && (
-              <View style={styles.channelHeaderCard}>
+            {searchPosts === null && selectedChannel && (
+              <View
+                style={[
+                  styles.channelHeaderCard,
+                  {
+                    backgroundColor: colors.surface,
+                    borderColor: colors.border,
+                  },
+                ]}
+              >
                 <View style={styles.channelTitleRow}>
-                  <Text style={styles.channelTitle}>
+                  <Text
+                    style={[styles.channelTitle, { color: colors.text }]}
+                    numberOfLines={2}
+                  >
                     {selectedChannel.privacy === 'private' ? '🔒 ' : '# '}
                     {selectedChannel.name}
                   </Text>
@@ -933,18 +1626,20 @@ export default function CommunityScreen() {
                       selectedChannel.privacy === 'public' ||
                       isOfficer) && (
                       <TouchableOpacity
-                        style={styles.newPostBtn}
-                        onPress={() => {
-                          setPostKind('discussion');
-                          setIsCreatePostVisible(true);
-                        }}
+                        style={[
+                          styles.newPostBtn,
+                          { backgroundColor: colors.primary },
+                        ]}
+                        onPress={() => openCreatePostModal('discussion')}
                       >
                         <Text style={styles.newPostBtnText}>+ New Post</Text>
                       </TouchableOpacity>
                     )}
                 </View>
                 {selectedChannel.description ? (
-                  <Text style={styles.channelDesc}>
+                  <Text
+                    style={[styles.channelDesc, { color: colors.secondary }]}
+                  >
                     {selectedChannel.description}
                   </Text>
                 ) : null}
@@ -953,53 +1648,141 @@ export default function CommunityScreen() {
                 {selectedChannel.isCreator && (
                   <View style={styles.creatorRow}>
                     <TouchableOpacity
-                      style={styles.creatorSmallBtn}
+                      style={[
+                        styles.creatorSmallBtn,
+                        {
+                          backgroundColor: colors.surfaceMuted,
+                          borderColor: colors.border,
+                          borderWidth: 1,
+                        },
+                        busyChannelActionId === selectedChannel.id && {
+                          opacity: 0.6,
+                        },
+                      ]}
+                      disabled={busyChannelActionId === selectedChannel.id}
                       onPress={() =>
                         handleToggleChannelPrivacy(selectedChannel)
                       }
                     >
-                      <Text style={styles.creatorSmallBtnText}>
+                      <Text
+                        style={[
+                          styles.creatorSmallBtnText,
+                          { color: colors.primary },
+                        ]}
+                      >
                         Switch to{' '}
                         {selectedChannel.privacy === 'public'
                           ? 'Private'
                           : 'Public'}
                       </Text>
                     </TouchableOpacity>
+
                     {selectedChannel.privacy === 'private' && (
                       <TouchableOpacity
-                        style={styles.creatorSmallBtn}
+                        style={[
+                          styles.creatorSmallBtn,
+                          {
+                            backgroundColor: colors.surfaceMuted,
+                            borderColor: colors.border,
+                            borderWidth: 1,
+                          },
+                          busyChannelActionId === selectedChannel.id && {
+                            opacity: 0.6,
+                          },
+                        ]}
+                        disabled={busyChannelActionId === selectedChannel.id}
                         onPress={() => handleOpenJoinRequests(selectedChannel)}
                       >
-                        <Text style={styles.creatorSmallBtnText}>
+                        <Text
+                          style={[
+                            styles.creatorSmallBtnText,
+                            { color: colors.primary },
+                          ]}
+                        >
                           Review Join Requests
                         </Text>
                       </TouchableOpacity>
                     )}
+
+                    <TouchableOpacity
+                      style={[
+                        styles.creatorSmallBtn,
+                        {
+                          backgroundColor: semantic.dangerBg,
+                          borderColor: semantic.dangerBorder,
+                          borderWidth: 1,
+                        },
+                        busyChannelActionId === selectedChannel.id && {
+                          opacity: 0.6,
+                        },
+                      ]}
+                      disabled={busyChannelActionId === selectedChannel.id}
+                      onPress={() => handleDeleteChannel(selectedChannel)}
+                    >
+                      <Text
+                        style={[
+                          styles.creatorSmallBtnText,
+                          { color: colors.danger },
+                        ]}
+                      >
+                        🗑️ Delete Channel
+                      </Text>
+                    </TouchableOpacity>
                   </View>
                 )}
 
                 {/* Non-member Private Channel Gate */}
                 {selectedChannel.privacy === 'private' &&
                   !selectedChannel.canRead && (
-                    <View style={styles.privateGateBox}>
-                      <Text style={styles.privateGateText}>
+                    <View
+                      style={[
+                        styles.privateGateBox,
+                        {
+                          backgroundColor: semantic.warningBg,
+                          borderColor: semantic.warningBorder,
+                          borderWidth: 1,
+                        },
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          styles.privateGateText,
+                          { color: semantic.warningText },
+                        ]}
+                      >
                         This is a private channel. Request membership from the
                         channel creator to view posts and attachments.
                       </Text>
                       {selectedChannel.membership === 'pending' ? (
-                        <Text style={styles.pendingMembershipText}>
+                        <Text
+                          style={[
+                            styles.pendingMembershipText,
+                            { color: semantic.warningAccent },
+                          ]}
+                        >
                           ⏳ Membership Request Pending Creator Approval
                         </Text>
                       ) : (
                         <TouchableOpacity
-                          style={styles.joinBtn}
+                          style={[
+                            styles.joinBtn,
+                            { backgroundColor: semantic.warningAccent },
+                            busyChannelActionId === selectedChannel.id && {
+                              opacity: 0.65,
+                            },
+                          ]}
+                          disabled={busyChannelActionId === selectedChannel.id}
                           onPress={() =>
                             handleRequestJoinPrivate(selectedChannel)
                           }
                         >
-                          <Text style={styles.joinBtnText}>
-                            Request to Join Private Channel
-                          </Text>
+                          {busyChannelActionId === selectedChannel.id ? (
+                            <ActivityIndicator size="small" color="#FFFFFF" />
+                          ) : (
+                            <Text style={styles.joinBtnText}>
+                              Request to Join Private Channel
+                            </Text>
+                          )}
                         </TouchableOpacity>
                       )}
                     </View>
@@ -1007,14 +1790,99 @@ export default function CommunityScreen() {
               </View>
             )}
 
-            {/* Posts List */}
-            {displayedPosts.length === 0 ? (
-              <View style={styles.emptyCard}>
-                <Text style={styles.emptyTitle}>No Discussions Yet</Text>
-                <Text style={styles.emptySub}>
-                  Select a public channel or tap "+ New Post" to start a
-                  conversation.
+            {/* Channel-Specific Posts Loader or Error */}
+            {isLoadingPosts ? (
+              <View
+                style={[
+                  styles.emptyCard,
+                  {
+                    backgroundColor: colors.surface,
+                    borderColor: colors.border,
+                  },
+                ]}
+              >
+                <ActivityIndicator size="large" color={colors.primary} />
+                <Text style={[styles.emptySub, { color: colors.secondary }]}>
+                  Loading discussions in #{selectedChannel?.name}...
                 </Text>
+              </View>
+            ) : postsError && searchPosts === null ? (
+              <View
+                style={[
+                  styles.emptyCard,
+                  {
+                    backgroundColor: colors.surface,
+                    borderColor: semantic.dangerBorder,
+                  },
+                ]}
+              >
+                <Text style={styles.emptyIcon}>⚠️</Text>
+                <Text style={[styles.emptyTitle, { color: colors.text }]}>
+                  Could Not Load Discussions
+                </Text>
+                <Text style={[styles.emptySub, { color: colors.secondary }]}>
+                  {postsError}
+                </Text>
+                {selectedChannel && (
+                  <TouchableOpacity
+                    style={[
+                      styles.emptyActionBtn,
+                      { backgroundColor: colors.primary },
+                    ]}
+                    onPress={() => loadChannelPosts(selectedChannel, false)}
+                  >
+                    <Text style={styles.emptyActionBtnText}>Retry</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+            ) : displayedPosts.length === 0 ? (
+              <View
+                style={[
+                  styles.emptyCard,
+                  {
+                    backgroundColor: colors.surface,
+                    borderColor: colors.border,
+                  },
+                ]}
+              >
+                <Text style={styles.emptyIcon}>💬</Text>
+                <Text style={[styles.emptyTitle, { color: colors.text }]}>
+                  {searchPosts !== null
+                    ? 'No Results Found'
+                    : 'No Discussions Yet'}
+                </Text>
+                <Text style={[styles.emptySub, { color: colors.secondary }]}>
+                  {searchPosts !== null
+                    ? `No discussions match "${activeSearchTerm}". Try a different term or clear search.`
+                    : 'Select a public channel or tap "+ New Post" to start a conversation.'}
+                </Text>
+                {searchPosts !== null ? (
+                  <TouchableOpacity
+                    style={[
+                      styles.emptyActionBtn,
+                      { backgroundColor: colors.primary },
+                    ]}
+                    onPress={clearSearch}
+                  >
+                    <Text style={styles.emptyActionBtnText}>Clear Search</Text>
+                  </TouchableOpacity>
+                ) : isVerifiedOwner &&
+                  selectedChannel &&
+                  (selectedChannel.canRead ||
+                    selectedChannel.privacy === 'public' ||
+                    isOfficer) ? (
+                  <TouchableOpacity
+                    style={[
+                      styles.emptyActionBtn,
+                      { backgroundColor: colors.primary },
+                    ]}
+                    onPress={() => openCreatePostModal('discussion')}
+                  >
+                    <Text style={styles.emptyActionBtnText}>
+                      + Start First Discussion
+                    </Text>
+                  </TouchableOpacity>
+                ) : null}
               </View>
             ) : (
               displayedPosts.map((post) => {
@@ -1026,11 +1894,27 @@ export default function CommunityScreen() {
                   isOfficer
                 );
                 const imageIds = parseImageFileIds(post.imageFileIds);
+                const isVoting = Boolean(votingTargets[`post:${post.id}`]);
+                const matchingChannelObj = post.channelId
+                  ? channels.find((c) => c.id === post.channelId)
+                  : undefined;
+
                 return (
-                  <View key={post.id} style={styles.postCard}>
+                  <View
+                    key={post.id}
+                    style={[
+                      styles.postCard,
+                      {
+                        backgroundColor: colors.surface,
+                        borderColor: colors.border,
+                      },
+                    ]}
+                  >
                     <View style={styles.postHeader}>
                       <View style={styles.authorMetaRow}>
-                        <Text style={styles.postAuthor}>
+                        <Text
+                          style={[styles.postAuthorName, { color: colors.text }]}
+                        >
                           👤 {post.authorName}
                         </Text>
                         {isOfficialAuthor && (
@@ -1045,21 +1929,74 @@ export default function CommunityScreen() {
                             </Text>
                           </View>
                         )}
-                        <Text style={styles.postAuthor}>
+                        <Text
+                          style={[
+                            styles.postTimestamp,
+                            { color: colors.secondary },
+                          ]}
+                        >
                           • {new Date(post.createdAt).toLocaleDateString()}
                         </Text>
                       </View>
                       {isAuthor && (
                         <TouchableOpacity
+                          style={[
+                            styles.deletePillBtn,
+                            {
+                              backgroundColor: semantic.dangerBg,
+                              borderColor: semantic.dangerBorder,
+                            },
+                          ]}
+                          disabled={deletingPostId === post.id}
+                          hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
                           onPress={() => handleDeletePost(post.id)}
                         >
-                          <Text style={styles.deleteText}>Delete</Text>
+                          <Text
+                            style={[styles.deleteText, { color: colors.danger }]}
+                          >
+                            Delete
+                          </Text>
                         </TouchableOpacity>
                       )}
                     </View>
 
-                    <Text style={styles.postTitle}>{post.title}</Text>
-                    <Text style={styles.postBody}>{post.body}</Text>
+                    {/* Channel attribution tag when viewing cross-channel search results */}
+                    {searchPosts !== null && post.channelName ? (
+                      <TouchableOpacity
+                        style={[
+                          styles.searchChannelPill,
+                          {
+                            backgroundColor: colors.primaryMuted,
+                            alignSelf: 'flex-start',
+                          },
+                        ]}
+                        onPress={() => {
+                          if (matchingChannelObj) {
+                            clearSearch();
+                            loadChannelPosts(matchingChannelObj, false);
+                          }
+                        }}
+                      >
+                        <Text
+                          style={{
+                            fontSize: 11,
+                            fontWeight: '700',
+                            color: colors.primary,
+                          }}
+                        >
+                          # {post.channelName}
+                        </Text>
+                      </TouchableOpacity>
+                    ) : null}
+
+                    <Text style={[styles.postTitle, { color: colors.text }]}>
+                      {post.title}
+                    </Text>
+                    <Text
+                      style={[styles.postBody, { color: colors.secondary }]}
+                    >
+                      {post.body}
+                    </Text>
 
                     {/* Private Storage Images via 5-Min Signed Token (`communityImageToken`) */}
                     {imageIds.length > 0 && (
@@ -1068,52 +2005,109 @@ export default function CommunityScreen() {
                         showsHorizontalScrollIndicator={false}
                         style={{ marginVertical: 10 }}
                       >
-                        {imageIds.map((fid) => (
+                        {imageIds.map((fid, idx) => (
                           <SignedCommunityImage
                             key={`${post.id}-${fid}`}
                             postId={post.id}
                             fileId={fid}
+                            index={idx}
+                            total={imageIds.length}
                             styles={styles}
+                            accentColor={colors.primary}
+                            secondaryColor={colors.secondary}
+                            onPreview={(uri) => setPreviewImageUri(uri)}
                           />
                         ))}
                       </ScrollView>
                     )}
 
                     {/* Vote & Comment Bar */}
-                    <View style={styles.postFooter}>
+                    <View
+                      style={[
+                        styles.postFooter,
+                        { borderColor: colors.border },
+                      ]}
+                    >
                       <View style={styles.voteGroup}>
                         <TouchableOpacity
                           style={[
                             styles.voteBtn,
-                            post.myVote === 1 && styles.voteBtnUpActive,
+                            { backgroundColor: colors.surfaceMuted },
+                            post.myVote === 1 && {
+                              backgroundColor: semantic.successBg,
+                              borderColor: semantic.successBorder,
+                            },
+                            isVoting && { opacity: 0.7 },
                           ]}
+                          disabled={isVoting}
                           onPress={() => handleVote('post', post.id, 1)}
+                          hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
                         >
-                          <Text style={styles.voteBtnText}>
+                          <Text
+                            style={[
+                              styles.voteBtnText,
+                              { color: colors.secondary },
+                              post.myVote === 1 && {
+                                color: semantic.successText,
+                              },
+                            ]}
+                          >
                             ▲ {post.upvotes ?? 0}
                           </Text>
                         </TouchableOpacity>
-                        <Text style={styles.scoreText}>
+
+                        <Text
+                          style={[
+                            styles.scoreText,
+                            { color: colors.secondary },
+                          ]}
+                        >
                           Score: {post.score ?? 0}
                         </Text>
+
                         <TouchableOpacity
                           style={[
                             styles.voteBtn,
-                            post.myVote === -1 && styles.voteBtnDownActive,
+                            { backgroundColor: colors.surfaceMuted },
+                            post.myVote === -1 && {
+                              backgroundColor: semantic.dangerBg,
+                              borderColor: semantic.dangerBorder,
+                            },
+                            isVoting && { opacity: 0.7 },
                           ]}
+                          disabled={isVoting}
                           onPress={() => handleVote('post', post.id, -1)}
+                          hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
                         >
-                          <Text style={styles.voteBtnText}>
+                          <Text
+                            style={[
+                              styles.voteBtnText,
+                              { color: colors.secondary },
+                              post.myVote === -1 && { color: colors.danger },
+                            ]}
+                          >
                             ▼ {post.downvotes ?? 0}
                           </Text>
                         </TouchableOpacity>
                       </View>
 
                       <TouchableOpacity
-                        style={styles.commentBtn}
+                        style={[
+                          styles.commentBtn,
+                          {
+                            backgroundColor: colors.primaryMuted,
+                            borderColor: colors.primary,
+                          },
+                        ]}
                         onPress={() => openCommentsModal(post)}
+                        hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
                       >
-                        <Text style={styles.commentBtnText}>
+                        <Text
+                          style={[
+                            styles.commentBtnText,
+                            { color: colors.primary },
+                          ]}
+                        >
                           💬 Comments ({post.commentCount ?? 0})
                         </Text>
                       </TouchableOpacity>
@@ -1130,123 +2124,426 @@ export default function CommunityScreen() {
           <>
             {isVerifiedOwner && (
               <TouchableOpacity
-                style={styles.createChannelBtn}
+                style={[
+                  styles.createChannelBtn,
+                  {
+                    backgroundColor: semantic.successBg,
+                    borderColor: semantic.successBorder,
+                  },
+                ]}
                 onPress={() => setIsCreateChannelVisible(true)}
               >
-                <Text style={styles.createChannelBtnText}>
+                <Text
+                  style={[
+                    styles.createChannelBtnText,
+                    { color: semantic.successText },
+                  ]}
+                >
                   + Create New Community Channel (Max 10)
                 </Text>
               </TouchableOpacity>
             )}
 
-            {channels.map((ch) => (
-              <View key={ch.id} style={styles.postCard}>
-                <View style={styles.channelTitleRow}>
-                  <Text style={styles.postTitle}>
-                    {ch.privacy === 'private' ? '🔒 ' : '# '}
-                    {ch.name}
-                  </Text>
-                  <Text style={styles.privacyBadge}>
-                    {ch.privacy.toUpperCase()}
-                  </Text>
-                </View>
-                <Text style={styles.postBody}>
-                  {ch.description || 'Iligan Pet Owner Community Channel'}
+            {displayedChannels.length === 0 ? (
+              <View
+                style={[
+                  styles.emptyCard,
+                  {
+                    backgroundColor: colors.surface,
+                    borderColor: colors.border,
+                  },
+                ]}
+              >
+                <Text style={styles.emptyIcon}>#️⃣</Text>
+                <Text style={[styles.emptyTitle, { color: colors.text }]}>
+                  {searchChannels !== null
+                    ? 'No Matching Channels'
+                    : 'No Channels Available'}
                 </Text>
-                <View
-                  style={{
-                    flexDirection: 'row',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    marginTop: 10,
-                  }}
-                >
-                  <Text style={styles.postAuthor}>
-                    Status: {ch.canRead ? 'Accessible' : ch.membership}
-                  </Text>
+                <Text style={[styles.emptySub, { color: colors.secondary }]}>
+                  {searchChannels !== null
+                    ? `No community channels match "${activeSearchTerm}".`
+                    : 'Create the first community channel to start connecting with pet owners.'}
+                </Text>
+                {searchChannels !== null && (
                   <TouchableOpacity
-                    style={styles.newPostBtn}
-                    onPress={() => {
-                      setActiveTab('feed');
-                      loadChannelPosts(ch);
-                    }}
+                    style={[
+                      styles.emptyActionBtn,
+                      { backgroundColor: colors.primary },
+                    ]}
+                    onPress={clearSearch}
                   >
-                    <Text style={styles.newPostBtnText}>Open Channel</Text>
+                    <Text style={styles.emptyActionBtnText}>Clear Search</Text>
                   </TouchableOpacity>
-                </View>
+                )}
               </View>
-            ))}
+            ) : (
+              displayedChannels.map((ch) => {
+                const statusBadge = getChannelStatusBadge(ch);
+                const isBusy = busyChannelActionId === ch.id;
+                return (
+                  <View
+                    key={ch.id}
+                    style={[
+                      styles.postCard,
+                      {
+                        backgroundColor: colors.surface,
+                        borderColor: colors.border,
+                      },
+                    ]}
+                  >
+                    <View style={styles.channelTitleRow}>
+                      <Text
+                        style={[
+                          styles.postTitle,
+                          { color: colors.text, flex: 1, marginRight: 8 },
+                        ]}
+                        numberOfLines={2}
+                      >
+                        {ch.privacy === 'private' ? '🔒 ' : '# '}
+                        {ch.name}
+                      </Text>
+                      <View
+                        style={[
+                          styles.privacyBadge,
+                          { backgroundColor: colors.primaryMuted },
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.privacyBadgeText,
+                            { color: colors.primary },
+                          ]}
+                        >
+                          {ch.privacy.toUpperCase()}
+                        </Text>
+                      </View>
+                    </View>
+
+                    <Text
+                      style={[styles.postBody, { color: colors.secondary }]}
+                    >
+                      {ch.description || 'Iligan Pet Owner Community Channel'}
+                    </Text>
+
+                    {ch.createdByName ? (
+                      <Text
+                        style={[
+                          styles.channelCreatorMeta,
+                          { color: colors.secondary },
+                        ]}
+                      >
+                        Created by {ch.createdByName}
+                      </Text>
+                    ) : null}
+
+                    <View style={styles.directoryCardFooter}>
+                      <View
+                        style={[
+                          styles.statusPill,
+                          { backgroundColor: statusBadge.bg },
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.statusPillText,
+                            { color: statusBadge.text },
+                          ]}
+                        >
+                          {statusBadge.label}
+                        </Text>
+                      </View>
+
+                      <View style={styles.directoryActionsRow}>
+                        {ch.isCreator && ch.privacy === 'private' && (
+                          <TouchableOpacity
+                            style={[
+                              styles.creatorSmallBtn,
+                              {
+                                backgroundColor: colors.surfaceMuted,
+                                borderColor: colors.border,
+                                borderWidth: 1,
+                              },
+                              isBusy && { opacity: 0.6 },
+                            ]}
+                            disabled={isBusy}
+                            onPress={() => handleOpenJoinRequests(ch)}
+                          >
+                            <Text
+                              style={[
+                                styles.creatorSmallBtnText,
+                                { color: colors.primary },
+                              ]}
+                            >
+                              Requests
+                            </Text>
+                          </TouchableOpacity>
+                        )}
+
+                        {ch.privacy === 'private' &&
+                          !ch.canRead &&
+                          ch.membership !== 'pending' &&
+                          !isOfficer && (
+                            <TouchableOpacity
+                              style={[
+                                styles.newPostBtn,
+                                { backgroundColor: semantic.warningAccent },
+                                isBusy && { opacity: 0.65 },
+                              ]}
+                              disabled={isBusy}
+                              onPress={() => handleRequestJoinPrivate(ch)}
+                            >
+                              <Text style={styles.newPostBtnText}>
+                                Request Join
+                              </Text>
+                            </TouchableOpacity>
+                          )}
+
+                        <TouchableOpacity
+                          style={[
+                            styles.newPostBtn,
+                            { backgroundColor: colors.primary },
+                          ]}
+                          onPress={() => {
+                            setActiveTab('feed');
+                            loadChannelPosts(ch, false);
+                          }}
+                        >
+                          <Text style={styles.newPostBtnText}>
+                            Open Channel
+                          </Text>
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  </View>
+                );
+              })
+            )}
           </>
         )}
 
         {/* AREA 3: OFFICIAL CVO OWNER NOTICES & OUTBREAK ALERTS (`communityOfficialNotices`) */}
         {activeTab === 'notices' && (
           <>
-            <View style={styles.officialHeaderBanner}>
+            <View
+              style={[
+                styles.officialHeaderBanner,
+                { backgroundColor: semantic.bannerBg },
+              ]}
+            >
               <Text style={styles.officialHeaderTitle}>
                 🏛️ Official Iligan City Veterinary Office Notices
               </Text>
-              <Text style={styles.officialHeaderSub}>
-                Displays official CVO owner-directed outbreak advisories and
-                public announcements.
+              <Text
+                style={[
+                  styles.officialHeaderSub,
+                  { color: semantic.bannerSub },
+                ]}
+              >
+                Official CVO owner-directed outbreak advisories and public
+                announcements.
               </Text>
               {isOfficer && (
                 <TouchableOpacity
                   style={[
                     styles.newPostBtn,
-                    { alignSelf: 'flex-start', marginTop: 10 },
+                    {
+                      backgroundColor: colors.primary,
+                      alignSelf: 'flex-start',
+                      marginTop: 10,
+                    },
                   ]}
-                  onPress={() => {
-                    setPostKind('announcement');
-                    setIsCreatePostVisible(true);
-                  }}
+                  onPress={() => openCreatePostModal('announcement')}
                 >
                   <Text style={styles.newPostBtnText}>
-                    + New Official Announcement
+                    + New Official Channel Post
                   </Text>
                 </TouchableOpacity>
               )}
             </View>
 
-            {notices.length === 0 ? (
-              <View style={styles.emptyCard}>
-                <Text style={styles.emptyTitle}>
-                  No Active CVO Owner Notices
+            {/* Category Filter Chips */}
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              style={{ marginBottom: 12 }}
+            >
+              {(
+                [
+                  { key: 'all', label: `All (${noticeCounts.all})` },
+                  {
+                    key: 'outbreak',
+                    label: `🚨 Outbreaks (${noticeCounts.outbreak})`,
+                  },
+                  {
+                    key: 'advisory',
+                    label: `⚠️ Advisories (${noticeCounts.advisory})`,
+                  },
+                  {
+                    key: 'announcement',
+                    label: `📢 Announcements (${noticeCounts.announcement})`,
+                  },
+                ] as const
+              ).map((item) => {
+                const selected = noticeFilter === item.key;
+                return (
+                  <TouchableOpacity
+                    key={item.key}
+                    style={[
+                      styles.channelChip,
+                      {
+                        backgroundColor: colors.surface,
+                        borderColor: colors.border,
+                      },
+                      selected && {
+                        backgroundColor: colors.primaryMuted,
+                        borderColor: colors.primary,
+                      },
+                    ]}
+                    onPress={() => setNoticeFilter(item.key)}
+                  >
+                    <Text
+                      style={[
+                        styles.channelChipText,
+                        { color: colors.secondary },
+                        selected && { color: colors.primary },
+                      ]}
+                    >
+                      {item.label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+
+            {filteredNotices.length === 0 ? (
+              <View
+                style={[
+                  styles.emptyCard,
+                  {
+                    backgroundColor: colors.surface,
+                    borderColor: colors.border,
+                  },
+                ]}
+              >
+                <Text style={styles.emptyIcon}>📢</Text>
+                <Text style={[styles.emptyTitle, { color: colors.text }]}>
+                  {notices.length === 0
+                    ? 'No Active CVO Owner Notices'
+                    : 'No Matching Notices'}
                 </Text>
-                <Text style={styles.emptySub}>
-                  Official outbreak alerts shared with pet owners and CVO
-                  announcements will appear here.
+                <Text style={[styles.emptySub, { color: colors.secondary }]}>
+                  {notices.length === 0
+                    ? 'Official outbreak alerts shared with pet owners and CVO announcements will appear here.'
+                    : 'Try selecting a different category filter or clearing your search.'}
                 </Text>
+                {(noticeFilter !== 'all' || activeSearchTerm.length > 0) && (
+                  <TouchableOpacity
+                    style={[
+                      styles.emptyActionBtn,
+                      { backgroundColor: colors.primary },
+                    ]}
+                    onPress={() => {
+                      setNoticeFilter('all');
+                      if (activeSearchTerm) clearSearch();
+                    }}
+                  >
+                    <Text style={styles.emptyActionBtnText}>Reset Filters</Text>
+                  </TouchableOpacity>
+                )}
               </View>
             ) : (
-              notices.map((n) => (
-                <View
-                  key={n.id}
-                  style={[
-                    styles.noticeCard,
-                    n.category === 'outbreak' && styles.noticeCardOutbreak,
-                  ]}
-                >
-                  <View style={styles.channelTitleRow}>
-                    <Text style={styles.cvoBadge}>
-                      ✓ CVO OFFICIAL • {String(n.category).toUpperCase()}
+              filteredNotices.map((n) => {
+                const sev = getNoticeSeverityStyle(n.priority, n.category);
+                return (
+                  <View
+                    key={n.id}
+                    style={[
+                      styles.noticeCard,
+                      {
+                        backgroundColor: colors.surface,
+                        borderColor: sev.border,
+                        borderLeftColor: sev.text,
+                      },
+                    ]}
+                  >
+                    <View style={styles.noticeBadgesRow}>
+                      <View
+                        style={[
+                          styles.statusPill,
+                          { backgroundColor: colors.primaryMuted },
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.statusPillText,
+                            { color: colors.primary },
+                          ]}
+                        >
+                          ✓ CVO • {String(n.category).toUpperCase()}
+                        </Text>
+                      </View>
+                      <View
+                        style={[styles.statusPill, { backgroundColor: sev.bg }]}
+                      >
+                        <Text
+                          style={[styles.statusPillText, { color: sev.text }]}
+                        >
+                          Priority: {String(n.priority || 'info').toUpperCase()}
+                        </Text>
+                      </View>
+                      {n.audience ? (
+                        <View
+                          style={[
+                            styles.statusPill,
+                            { backgroundColor: colors.surfaceMuted },
+                          ]}
+                        >
+                          <Text
+                            style={[
+                              styles.statusPillText,
+                              { color: colors.secondary },
+                            ]}
+                          >
+                            {n.audience === 'both'
+                              ? 'Citywide'
+                              : n.audience === 'officers'
+                              ? 'Staff'
+                              : 'Pet Owners'}
+                          </Text>
+                        </View>
+                      ) : null}
+                    </View>
+
+                    <Text style={[styles.postTitle, { color: colors.text }]}>
+                      {n.title}
                     </Text>
-                    <Text style={styles.noticePriority}>
-                      Priority: {String(n.priority || 'info').toUpperCase()}
+                    {n.barangay ? (
+                      <Text
+                        style={[styles.noticeBrgy, { color: colors.text }]}
+                      >
+                        📍 Barangay: {n.barangay}
+                      </Text>
+                    ) : null}
+                    <Text
+                      style={[styles.postBody, { color: colors.secondary }]}
+                    >
+                      {String(n.body || '').replace(
+                        /^\[Barangay:\s*([^\]]+)\]\s*\n?/i,
+                        ''
+                      )}
+                    </Text>
+                    <Text
+                      style={[
+                        styles.postTimestamp,
+                        { color: colors.secondary, marginTop: 8 },
+                      ]}
+                    >
+                      Published: {new Date(n.date).toLocaleString()}
                     </Text>
                   </View>
-                  <Text style={styles.postTitle}>{n.title}</Text>
-                  {n.barangay ? (
-                    <Text style={styles.noticeBrgy}>
-                      📍 Barangay: {n.barangay}
-                    </Text>
-                  ) : null}
-                  <Text style={styles.postBody}>{n.body}</Text>
-                  <Text style={[styles.postAuthor, { marginTop: 6 }]}>
-                    Published: {new Date(n.date).toLocaleString()}
-                  </Text>
-                </View>
-              ))
+                );
+              })
             )}
           </>
         )}
@@ -1257,73 +2554,120 @@ export default function CommunityScreen() {
         visible={isCreateChannelVisible}
         animationType="slide"
         transparent
-        onRequestClose={() => setIsCreateChannelVisible(false)}
+        onRequestClose={resetCreateChannelModal}
       >
         <KeyboardAvoidingView
           style={styles.modalOverlay}
           behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         >
-          <View style={styles.modalCard}>
+          <View
+            style={[styles.modalCard, { backgroundColor: colors.surface }]}
+          >
             <ScrollView
               keyboardShouldPersistTaps="handled"
               showsVerticalScrollIndicator={false}
             >
-              <Text style={styles.modalTitle}>Create Community Channel</Text>
-              <Text style={styles.fieldLabel}>Channel Name (1–80 chars) *</Text>
+              <Text style={[styles.modalTitle, { color: colors.text }]}>
+                Create Community Channel
+              </Text>
+              <Text style={[styles.fieldLabel, { color: colors.secondary }]}>
+                Channel Name (1–80 chars) *
+              </Text>
               <TextInput
-                style={styles.input}
+                style={[
+                  styles.input,
+                  {
+                    backgroundColor: colors.background,
+                    borderColor: colors.border,
+                    color: colors.text,
+                  },
+                ]}
                 maxLength={80}
                 value={newChannelName}
                 onChangeText={setNewChannelName}
                 placeholder="e.g. Iligan Cat Owners Club"
-                placeholderTextColor="#94A3B8"
+                placeholderTextColor={colors.secondary}
               />
-              <Text style={styles.fieldLabel}>
+              <Text style={[styles.fieldLabel, { color: colors.secondary }]}>
                 Description (0–300 chars, optional)
               </Text>
               <TextInput
-                style={[styles.input, { height: 70 }]}
+                style={[
+                  styles.input,
+                  {
+                    height: 76,
+                    textAlignVertical: 'top',
+                    backgroundColor: colors.background,
+                    borderColor: colors.border,
+                    color: colors.text,
+                  },
+                ]}
                 maxLength={300}
                 multiline
                 value={newChannelDesc}
                 onChangeText={setNewChannelDesc}
                 placeholder="What is this channel about?"
-                placeholderTextColor="#94A3B8"
+                placeholderTextColor={colors.secondary}
               />
-              <Text style={styles.fieldLabel}>Channel Privacy</Text>
+              <Text style={[styles.fieldLabel, { color: colors.secondary }]}>
+                Channel Privacy
+              </Text>
               <View style={{ flexDirection: 'row', gap: 8, marginBottom: 14 }}>
-                {(['public', 'private'] as const).map((p) => (
-                  <TouchableOpacity
-                    key={p}
-                    style={[
-                      styles.privacyChoice,
-                      newChannelPrivacy === p && styles.privacyChoiceActive,
-                    ]}
-                    onPress={() => setNewChannelPrivacy(p)}
-                  >
-                    <Text
+                {(['public', 'private'] as const).map((p) => {
+                  const selected = newChannelPrivacy === p;
+                  return (
+                    <TouchableOpacity
+                      key={p}
                       style={[
-                        styles.privacyChoiceText,
-                        newChannelPrivacy === p &&
-                          styles.privacyChoiceTextActive,
+                        styles.privacyChoice,
+                        { borderColor: colors.border },
+                        selected && {
+                          backgroundColor: colors.primaryMuted,
+                          borderColor: colors.primary,
+                        },
                       ]}
+                      onPress={() => setNewChannelPrivacy(p)}
                     >
-                      {p === 'public' ? '🌐 Public' : '🔒 Private (Approval)'}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
+                      <Text
+                        style={[
+                          styles.privacyChoiceText,
+                          { color: colors.secondary },
+                          selected && {
+                            color: colors.primary,
+                            fontWeight: 'bold',
+                          },
+                        ]}
+                      >
+                        {p === 'public'
+                          ? '🌐 Public'
+                          : '🔒 Private (Approval)'}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
               </View>
               <View style={styles.modalActions}>
                 <TouchableOpacity
-                  style={styles.cancelBtn}
-                  onPress={() => setIsCreateChannelVisible(false)}
+                  style={[styles.cancelBtn, { borderColor: colors.border }]}
+                  disabled={isSubmitting}
+                  onPress={resetCreateChannelModal}
                 >
-                  <Text style={styles.cancelBtnText}>Cancel</Text>
+                  <Text
+                    style={[styles.cancelBtnText, { color: colors.secondary }]}
+                  >
+                    Cancel
+                  </Text>
                 </TouchableOpacity>
                 <TouchableOpacity
-                  style={styles.submitBtn}
+                  style={[
+                    styles.submitBtn,
+                    { backgroundColor: colors.primary },
+                    (!newChannelName.trim() || isSubmitting) && {
+                      opacity: 0.55,
+                    },
+                  ]}
                   onPress={handleCreateChannel}
-                  disabled={isSubmitting}
+                  disabled={!newChannelName.trim() || isSubmitting}
                 >
                   {isSubmitting ? (
                     <ActivityIndicator color="#FFFFFF" />
@@ -1342,77 +2686,173 @@ export default function CommunityScreen() {
         visible={isCreatePostVisible}
         animationType="slide"
         transparent
-        onRequestClose={() => setIsCreatePostVisible(false)}
+        onRequestClose={resetCreatePostModal}
       >
         <KeyboardAvoidingView
           style={styles.modalOverlay}
           behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         >
-          <View style={styles.modalCard}>
+          <View
+            style={[styles.modalCard, { backgroundColor: colors.surface }]}
+          >
             <ScrollView
               keyboardShouldPersistTaps="handled"
               showsVerticalScrollIndicator={false}
             >
-              <Text style={styles.modalTitle}>
+              <Text style={[styles.modalTitle, { color: colors.text }]}>
                 {isOfficer && postKind === 'announcement'
-                  ? 'Publish Official CVO Announcement'
-                  : `Post in #${selectedChannel?.name || 'Community'}`}
+                  ? 'Publish Official Staff Post'
+                  : 'Create Community Discussion'}
               </Text>
+
+              {/* Channel Selector inside Create Post Modal */}
+              {writableChannels.length > 0 && (
+                <>
+                  <Text
+                    style={[styles.fieldLabel, { color: colors.secondary }]}
+                  >
+                    Target Channel *
+                  </Text>
+                  <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    style={{ marginBottom: 6 }}
+                  >
+                    {writableChannels.map((ch) => {
+                      const active =
+                        (postTargetChannelId || selectedChannel?.id) === ch.id;
+                      return (
+                        <TouchableOpacity
+                          key={ch.id}
+                          style={[
+                            styles.channelChip,
+                            {
+                              backgroundColor: colors.background,
+                              borderColor: colors.border,
+                            },
+                            active && {
+                              backgroundColor: colors.primaryMuted,
+                              borderColor: colors.primary,
+                            },
+                          ]}
+                          onPress={() => setPostTargetChannelId(ch.id)}
+                        >
+                          <Text
+                            style={[
+                              styles.channelChipText,
+                              { color: colors.secondary },
+                              active && { color: colors.primary },
+                            ]}
+                          >
+                            {ch.privacy === 'private' ? '🔒 ' : '# '}
+                            {ch.name}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </ScrollView>
+                </>
+              )}
+
               {isOfficer && (
                 <>
-                  <Text style={styles.fieldLabel}>Post Type</Text>
+                  <Text
+                    style={[styles.fieldLabel, { color: colors.secondary }]}
+                  >
+                    Post Type
+                  </Text>
                   <View
                     style={{ flexDirection: 'row', gap: 8, marginBottom: 8 }}
                   >
-                    {(['discussion', 'announcement'] as const).map((kind) => (
-                      <TouchableOpacity
-                        key={kind}
-                        style={[
-                          styles.privacyChoice,
-                          postKind === kind && styles.privacyChoiceActive,
-                        ]}
-                        onPress={() => setPostKind(kind)}
-                      >
-                        <Text
+                    {(['discussion', 'announcement'] as const).map((kind) => {
+                      const selected = postKind === kind;
+                      return (
+                        <TouchableOpacity
+                          key={kind}
                           style={[
-                            styles.privacyChoiceText,
-                            postKind === kind &&
-                              styles.privacyChoiceTextActive,
+                            styles.privacyChoice,
+                            { borderColor: colors.border },
+                            selected && {
+                              backgroundColor: colors.primaryMuted,
+                              borderColor: colors.primary,
+                            },
                           ]}
+                          onPress={() => setPostKind(kind)}
                         >
-                          {kind === 'discussion'
-                            ? '💬 Discussion Post'
-                            : '📢 Official Announcement'}
-                        </Text>
-                      </TouchableOpacity>
-                    ))}
+                          <Text
+                            style={[
+                              styles.privacyChoiceText,
+                              { color: colors.secondary },
+                              selected && {
+                                color: colors.primary,
+                                fontWeight: 'bold',
+                              },
+                            ]}
+                          >
+                            {kind === 'discussion'
+                              ? '💬 Discussion Post'
+                              : '📢 Official CVO Tag'}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
                   </View>
                 </>
               )}
-              <Text style={styles.fieldLabel}>Title (1–140 chars) *</Text>
+
+              <Text style={[styles.fieldLabel, { color: colors.secondary }]}>
+                Title (1–140 chars) *
+              </Text>
               <TextInput
-                style={styles.input}
+                style={[
+                  styles.input,
+                  {
+                    backgroundColor: colors.background,
+                    borderColor: colors.border,
+                    color: colors.text,
+                  },
+                ]}
                 maxLength={140}
                 value={postTitle}
                 onChangeText={setPostTitle}
                 placeholder="Discussion title..."
-                placeholderTextColor="#94A3B8"
+                placeholderTextColor={colors.secondary}
               />
-              <Text style={styles.fieldLabel}>Body (1–5000 chars) *</Text>
+              <Text style={[styles.fieldLabel, { color: colors.secondary }]}>
+                Body (1–5000 chars) *
+              </Text>
               <TextInput
-                style={[styles.input, { height: 100, textAlignVertical: 'top' }]}
+                style={[
+                  styles.input,
+                  {
+                    height: 110,
+                    textAlignVertical: 'top',
+                    backgroundColor: colors.background,
+                    borderColor: colors.border,
+                    color: colors.text,
+                  },
+                ]}
                 maxLength={5000}
                 multiline
                 value={postBody}
                 onChangeText={setPostBody}
                 placeholder="Write your discussion..."
-                placeholderTextColor="#94A3B8"
+                placeholderTextColor={colors.secondary}
               />
               <TouchableOpacity
-                style={styles.attachBtn}
+                style={[
+                  styles.attachBtn,
+                  {
+                    backgroundColor: colors.background,
+                    borderColor: colors.border,
+                  },
+                ]}
+                disabled={isSubmitting}
                 onPress={handlePickPostImage}
               >
-                <Text style={styles.attachBtnText}>
+                <Text
+                  style={[styles.attachBtnText, { color: colors.primary }]}
+                >
                   📷 Attach Private Image ({postImages.length}/4 selected)
                 </Text>
               </TouchableOpacity>
@@ -1423,13 +2863,16 @@ export default function CommunityScreen() {
                   showsHorizontalScrollIndicator={false}
                   style={{ marginTop: 10 }}
                 >
-                  {postImages.map((img, idx) => (
-                    <View key={idx} style={{ marginRight: 8 }}>
+                  {postImages.map((item, idx) => (
+                    <View key={idx} style={{ marginRight: 10 }}>
                       <Image
-                        source={{ uri: img.uri }}
-                        style={{ width: 64, height: 64, borderRadius: 8 }}
+                        source={{ uri: item.asset.uri }}
+                        style={{ width: 68, height: 68, borderRadius: 10 }}
                       />
                       <TouchableOpacity
+                        style={styles.removeImageBtn}
+                        disabled={isSubmitting}
+                        hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
                         onPress={() =>
                           setPostImages((prev) =>
                             prev.filter((_, i) => i !== idx)
@@ -1438,10 +2881,10 @@ export default function CommunityScreen() {
                       >
                         <Text
                           style={{
-                            color: '#D9534F',
+                            color: colors.danger,
                             fontSize: 11,
+                            fontWeight: '700',
                             textAlign: 'center',
-                            marginTop: 2,
                           }}
                         >
                           Remove
@@ -1454,15 +2897,28 @@ export default function CommunityScreen() {
 
               <View style={styles.modalActions}>
                 <TouchableOpacity
-                  style={styles.cancelBtn}
-                  onPress={() => setIsCreatePostVisible(false)}
+                  style={[styles.cancelBtn, { borderColor: colors.border }]}
+                  disabled={isSubmitting}
+                  onPress={resetCreatePostModal}
                 >
-                  <Text style={styles.cancelBtnText}>Cancel</Text>
+                  <Text
+                    style={[styles.cancelBtnText, { color: colors.secondary }]}
+                  >
+                    Cancel
+                  </Text>
                 </TouchableOpacity>
                 <TouchableOpacity
-                  style={styles.submitBtn}
+                  style={[
+                    styles.submitBtn,
+                    { backgroundColor: colors.primary },
+                    (!postTitle.trim() || !postBody.trim() || isSubmitting) && {
+                      opacity: 0.55,
+                    },
+                  ]}
                   onPress={handleCreatePost}
-                  disabled={isSubmitting}
+                  disabled={
+                    !postTitle.trim() || !postBody.trim() || isSubmitting
+                  }
                 >
                   {isSubmitting ? (
                     <ActivityIndicator color="#FFFFFF" />
@@ -1487,19 +2943,76 @@ export default function CommunityScreen() {
           style={styles.modalOverlay}
           behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         >
-          <View style={[styles.modalCard, { maxHeight: '88%' }]}>
-            <Text style={styles.modalTitle}>
-              Comments: {activePostForComments?.title}
-            </Text>
+          <View
+            style={[
+              styles.modalCard,
+              { backgroundColor: colors.surface, maxHeight: '88%' },
+            ]}
+          >
+            <View style={styles.modalHeaderRow}>
+              <Text
+                style={[styles.modalTitle, { color: colors.text, flex: 1, marginBottom: 0 }]}
+                numberOfLines={2}
+              >
+                Comments: {activePostForComments?.title}
+              </Text>
+              <TouchableOpacity
+                style={[
+                  styles.modalCloseIconBtn,
+                  { backgroundColor: colors.surfaceMuted },
+                ]}
+                onPress={() => setActivePostForComments(null)}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              >
+                <Text
+                  style={{
+                    color: colors.secondary,
+                    fontSize: 15,
+                    fontWeight: 'bold',
+                  }}
+                >
+                  ✕
+                </Text>
+              </TouchableOpacity>
+            </View>
 
             <ScrollView
+              ref={commentsScrollRef}
               keyboardShouldPersistTaps="handled"
-              style={{ maxHeight: 320, marginVertical: 10 }}
+              style={styles.commentsScroll}
             >
               {loadingComments ? (
-                <ActivityIndicator color="#00AEEF" />
+                <View style={{ paddingVertical: 24, alignItems: 'center' }}>
+                  <ActivityIndicator color={colors.primary} />
+                </View>
+              ) : commentsError ? (
+                <View style={{ paddingVertical: 16, alignItems: 'center' }}>
+                  <Text style={[styles.emptySub, { color: colors.danger }]}>
+                    {commentsError}
+                  </Text>
+                  {activePostForComments && (
+                    <TouchableOpacity
+                      style={[
+                        styles.emptyActionBtn,
+                        { backgroundColor: colors.primary },
+                      ]}
+                      onPress={() =>
+                        openCommentsModal(activePostForComments, false)
+                      }
+                    >
+                      <Text style={styles.emptyActionBtnText}>Retry</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
               ) : comments.length === 0 ? (
-                <Text style={styles.emptySub}>No comments yet.</Text>
+                <Text
+                  style={[
+                    styles.emptySub,
+                    { color: colors.secondary, marginVertical: 18 },
+                  ]}
+                >
+                  No comments yet. Be the first to share your thoughts!
+                </Text>
               ) : (
                 comments.map((c) => {
                   const isMyComment =
@@ -1509,17 +3022,50 @@ export default function CommunityScreen() {
                     user?.id,
                     isOfficer
                   );
+                  const parentComment = c.parentCommentId
+                    ? commentsById.get(c.parentCommentId)
+                    : undefined;
+                  const isVotingComment = Boolean(
+                    votingTargets[`comment:${c.id}`]
+                  );
+
                   return (
                     <View
                       key={c.id}
                       style={[
                         styles.commentItem,
-                        c.parentCommentId ? { marginLeft: 18 } : null,
+                        {
+                          backgroundColor: colors.background,
+                          borderColor: colors.border,
+                        },
+                        c.parentCommentId
+                          ? {
+                              marginLeft: 16,
+                              borderLeftWidth: 3,
+                              borderLeftColor: colors.primary,
+                            }
+                          : null,
                       ]}
                     >
+                      {parentComment && (
+                        <Text
+                          style={[
+                            styles.replyContextText,
+                            { color: colors.primary },
+                          ]}
+                          numberOfLines={1}
+                        >
+                          ↳ Replying to {parentComment.authorName}
+                        </Text>
+                      )}
                       <View style={styles.postHeader}>
                         <View style={styles.authorMetaRow}>
-                          <Text style={styles.postAuthor}>
+                          <Text
+                            style={[
+                              styles.postAuthorName,
+                              { color: colors.text },
+                            ]}
+                          >
                             {c.authorName}
                           </Text>
                           {isOfficialCommentAuthor && (
@@ -1534,39 +3080,116 @@ export default function CommunityScreen() {
                               </Text>
                             </View>
                           )}
-                          <Text style={styles.postAuthor}>
+                          <Text
+                            style={[
+                              styles.postTimestamp,
+                              { color: colors.secondary },
+                            ]}
+                          >
                             • {new Date(c.createdAt).toLocaleDateString()}
                           </Text>
                         </View>
                         {isMyComment && (
                           <TouchableOpacity
+                            style={[
+                              styles.commentActionPill,
+                              { backgroundColor: semantic.dangerBg },
+                            ]}
+                            disabled={deletingCommentId === c.id}
+                            hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
                             onPress={() => handleDeleteComment(c.id)}
                           >
-                            <Text style={styles.deleteText}>Delete</Text>
+                            <Text
+                              style={[
+                                styles.deleteText,
+                                { color: colors.danger },
+                              ]}
+                            >
+                              Delete
+                            </Text>
                           </TouchableOpacity>
                         )}
                       </View>
-                      <Text style={styles.postBody}>{c.body}</Text>
+                      <Text style={[styles.postBody, { color: colors.text }]}>
+                        {c.body}
+                      </Text>
                       <View style={styles.commentActions}>
                         <TouchableOpacity
+                          style={[
+                            styles.commentActionPill,
+                            { backgroundColor: colors.surfaceMuted },
+                            c.myVote === 1 && {
+                              backgroundColor: semantic.successBg,
+                            },
+                            isVotingComment && { opacity: 0.7 },
+                          ]}
+                          disabled={isVotingComment}
                           onPress={() => handleVote('comment', c.id, 1)}
                         >
-                          <Text style={styles.voteSmall}>
+                          <Text
+                            style={[
+                              styles.voteSmall,
+                              { color: colors.secondary },
+                              c.myVote === 1 && {
+                                color: semantic.successText,
+                              },
+                            ]}
+                          >
                             ▲ {c.upvotes ?? 0}
                           </Text>
                         </TouchableOpacity>
+
                         <TouchableOpacity
+                          style={[
+                            styles.commentActionPill,
+                            { backgroundColor: colors.surfaceMuted },
+                            c.myVote === -1 && {
+                              backgroundColor: semantic.dangerBg,
+                            },
+                            isVotingComment && { opacity: 0.7 },
+                          ]}
+                          disabled={isVotingComment}
                           onPress={() => handleVote('comment', c.id, -1)}
                         >
-                          <Text style={styles.voteSmall}>
+                          <Text
+                            style={[
+                              styles.voteSmall,
+                              { color: colors.secondary },
+                              c.myVote === -1 && { color: colors.danger },
+                            ]}
+                          >
                             ▼ {c.downvotes ?? 0}
                           </Text>
                         </TouchableOpacity>
+
                         {isVerifiedOwner && (
                           <TouchableOpacity
-                            onPress={() => setReplyToCommentId(c.id)}
+                            style={[
+                              styles.commentActionPill,
+                              { backgroundColor: colors.primaryMuted },
+                            ]}
+                            onPress={() => {
+                              setReplyToComment({
+                                id: c.id,
+                                authorName: c.authorName,
+                                snippet: String(c.body || '')
+                                  .trim()
+                                  .slice(0, 42),
+                              });
+                              setTimeout(
+                                () => commentInputRef.current?.focus(),
+                                80
+                              );
+                            }}
                           >
-                            <Text style={styles.replyLink}>Reply</Text>
+                            <Text
+                              style={[
+                                styles.replyLink,
+                                { color: colors.primary },
+                              ]}
+                            >
+                              Reply
+                            </Text>
                           </TouchableOpacity>
                         )}
                       </View>
@@ -1578,18 +3201,48 @@ export default function CommunityScreen() {
 
             {isVerifiedOwner && (
               <>
-                {replyToCommentId ? (
-                  <TouchableOpacity onPress={() => setReplyToCommentId('')}>
-                    <Text style={styles.replyingBanner}>
-                      Replying to comment #{replyToCommentId.slice(0, 6)} (Tap
-                      to cancel)
+                {replyToComment ? (
+                  <TouchableOpacity
+                    style={[
+                      styles.replyingBannerBox,
+                      {
+                        backgroundColor: colors.primaryMuted,
+                        borderColor: colors.primary,
+                      },
+                    ]}
+                    onPress={() => setReplyToComment(null)}
+                  >
+                    <Text
+                      style={[
+                        styles.replyingBanner,
+                        { color: colors.primary, marginBottom: 0 },
+                      ]}
+                      numberOfLines={1}
+                    >
+                      Replying to {replyToComment.authorName}: "
+                      {replyToComment.snippet}" (Tap to cancel)
                     </Text>
                   </TouchableOpacity>
                 ) : null}
                 <TextInput
-                  style={styles.input}
-                  placeholder="Write a comment..."
-                  placeholderTextColor="#94A3B8"
+                  ref={commentInputRef}
+                  style={[
+                    styles.input,
+                    {
+                      maxHeight: 96,
+                      backgroundColor: colors.background,
+                      borderColor: colors.border,
+                      color: colors.text,
+                    },
+                  ]}
+                  multiline
+                  maxLength={2000}
+                  placeholder={
+                    replyToComment
+                      ? `Reply to ${replyToComment.authorName}...`
+                      : 'Write a comment...'
+                  }
+                  placeholderTextColor={colors.secondary}
                   value={newCommentBody}
                   onChangeText={setNewCommentBody}
                 />
@@ -1598,18 +3251,33 @@ export default function CommunityScreen() {
 
             <View style={styles.modalActions}>
               <TouchableOpacity
-                style={styles.cancelBtn}
+                style={[styles.cancelBtn, { borderColor: colors.border }]}
+                disabled={isSubmitting}
                 onPress={() => setActivePostForComments(null)}
               >
-                <Text style={styles.cancelBtnText}>Close</Text>
+                <Text
+                  style={[styles.cancelBtnText, { color: colors.secondary }]}
+                >
+                  Close
+                </Text>
               </TouchableOpacity>
               {isVerifiedOwner && (
                 <TouchableOpacity
-                  style={styles.submitBtn}
+                  style={[
+                    styles.submitBtn,
+                    { backgroundColor: colors.primary },
+                    (!newCommentBody.trim() || isSubmitting) && {
+                      opacity: 0.55,
+                    },
+                  ]}
                   onPress={handleAddComment}
-                  disabled={isSubmitting}
+                  disabled={!newCommentBody.trim() || isSubmitting}
                 >
-                  <Text style={styles.submitBtnText}>Post Comment</Text>
+                  {isSubmitting ? (
+                    <ActivityIndicator color="#FFFFFF" />
+                  ) : (
+                    <Text style={styles.submitBtnText}>Post Comment</Text>
+                  )}
                 </TouchableOpacity>
               )}
             </View>
@@ -1625,42 +3293,147 @@ export default function CommunityScreen() {
         onRequestClose={() => setIsJoinReqModalVisible(false)}
       >
         <View style={styles.modalOverlay}>
-          <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>Pending Private Join Requests</Text>
-            {joinRequests.length === 0 ? (
-              <Text style={[styles.emptySub, { marginVertical: 14 }]}>
-                No pending requests for this channel.
-              </Text>
-            ) : (
-              joinRequests.map((req) => (
-                <View key={req.id} style={styles.commentItem}>
-                  <Text style={styles.postTitle}>{req.userName}</Text>
-                  <View style={{ flexDirection: 'row', gap: 8, marginTop: 8 }}>
-                    <TouchableOpacity
-                      style={[styles.cancelBtn, { borderColor: '#D9534F' }]}
-                      onPress={() => handleReviewJoinRequest(req.id, 'rejected')}
+          <View
+            style={[styles.modalCard, { backgroundColor: colors.surface }]}
+          >
+            <Text style={[styles.modalTitle, { color: colors.text }]}>
+              Pending Join Requests
+              {joinReqChannel ? ` • #${joinReqChannel.name}` : ''}
+            </Text>
+            <ScrollView style={{ maxHeight: 340 }}>
+              {joinRequests.length === 0 ? (
+                <Text
+                  style={[
+                    styles.emptySub,
+                    { color: colors.secondary, marginVertical: 14 },
+                  ]}
+                >
+                  No pending requests for this channel.
+                </Text>
+              ) : (
+                joinRequests.map((req) => {
+                  const isBusy = reviewingReqId === req.id;
+                  return (
+                    <View
+                      key={req.id}
+                      style={[
+                        styles.commentItem,
+                        {
+                          backgroundColor: colors.background,
+                          borderColor: colors.border,
+                        },
+                      ]}
                     >
-                      <Text style={{ color: '#D9534F', fontWeight: 'bold' }}>
-                        Reject
+                      <Text style={[styles.postTitle, { color: colors.text }]}>
+                        {req.userName}
                       </Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      style={[styles.submitBtn, { backgroundColor: '#16A34A' }]}
-                      onPress={() => handleReviewJoinRequest(req.id, 'approved')}
-                    >
-                      <Text style={styles.submitBtnText}>Approve</Text>
-                    </TouchableOpacity>
-                  </View>
-                </View>
-              ))
-            )}
+                      <Text
+                        style={[
+                          styles.postTimestamp,
+                          { color: colors.secondary },
+                        ]}
+                      >
+                        Requested{' '}
+                        {new Date(req.requestedAt).toLocaleDateString()}
+                      </Text>
+                      <View
+                        style={{
+                          flexDirection: 'row',
+                          gap: 8,
+                          marginTop: 10,
+                        }}
+                      >
+                        <TouchableOpacity
+                          style={[
+                            styles.cancelBtn,
+                            {
+                              borderColor: colors.danger,
+                              backgroundColor: semantic.dangerBg,
+                            },
+                            isBusy && { opacity: 0.6 },
+                          ]}
+                          disabled={Boolean(reviewingReqId)}
+                          onPress={() =>
+                            handleReviewJoinRequest(req.id, 'rejected')
+                          }
+                        >
+                          {isBusy ? (
+                            <ActivityIndicator
+                              size="small"
+                              color={colors.danger}
+                            />
+                          ) : (
+                            <Text
+                              style={{
+                                color: colors.danger,
+                                fontWeight: 'bold',
+                              }}
+                            >
+                              Reject
+                            </Text>
+                          )}
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={[
+                            styles.submitBtn,
+                            { backgroundColor: semantic.successText },
+                            isBusy && { opacity: 0.6 },
+                          ]}
+                          disabled={Boolean(reviewingReqId)}
+                          onPress={() =>
+                            handleReviewJoinRequest(req.id, 'approved')
+                          }
+                        >
+                          {isBusy ? (
+                            <ActivityIndicator size="small" color="#FFFFFF" />
+                          ) : (
+                            <Text style={styles.submitBtnText}>Approve</Text>
+                          )}
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  );
+                })
+              )}
+            </ScrollView>
             <TouchableOpacity
-              style={[styles.cancelBtn, { marginTop: 12 }]}
+              style={[
+                styles.cancelBtn,
+                { marginTop: 12, borderColor: colors.border },
+              ]}
               onPress={() => setIsJoinReqModalVisible(false)}
             >
-              <Text style={styles.cancelBtnText}>Close</Text>
+              <Text
+                style={[styles.cancelBtnText, { color: colors.secondary }]}
+              >
+                Close
+              </Text>
             </TouchableOpacity>
           </View>
+        </View>
+      </Modal>
+
+      {/* Modal 5: Fullscreen Image Preview */}
+      <Modal
+        visible={!!previewImageUri}
+        animationType="fade"
+        transparent
+        onRequestClose={() => setPreviewImageUri(null)}
+      >
+        <View style={styles.imagePreviewOverlay}>
+          <TouchableOpacity
+            style={styles.imagePreviewCloseBtn}
+            onPress={() => setPreviewImageUri(null)}
+          >
+            <Text style={styles.imagePreviewCloseText}>✕ Close</Text>
+          </TouchableOpacity>
+          {previewImageUri && (
+            <Image
+              source={{ uri: previewImageUri }}
+              style={styles.imagePreviewFull}
+              resizeMode="contain"
+            />
+          )}
         </View>
       </Modal>
     </View>
@@ -1668,125 +3441,205 @@ export default function CommunityScreen() {
 }
 
 const baseStyles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#F8FAFC' },
+  container: { flex: 1, backgroundColor: '#F2F5FA' },
   readOnlyBanner: {
-    backgroundColor: '#FEF3C7',
     paddingHorizontal: 14,
-    paddingVertical: 8,
+    paddingVertical: 10,
     borderBottomWidth: 1,
-    borderColor: '#F59E0B',
   },
-  readOnlyBannerText: { fontSize: 11, color: '#92400E', fontWeight: '600' },
+  readOnlyBannerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  readOnlyBannerText: { fontSize: 12, fontWeight: '600', lineHeight: 16 },
+  verifyCtaBtn: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    flexShrink: 0,
+  },
+  verifyCtaText: { color: '#FFFFFF', fontSize: 11, fontWeight: 'bold' },
   searchBarRow: {
     flexDirection: 'row',
-    padding: 12,
-    backgroundColor: '#FFFFFF',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    alignItems: 'center',
     gap: 8,
+  },
+  searchInputWrap: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderRadius: 10,
+    height: 44,
+    paddingHorizontal: 12,
   },
   searchInput: {
     flex: 1,
-    backgroundColor: '#F1F5F9',
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
     fontSize: 13,
-    color: '#1E293B',
+    paddingVertical: 0,
+  },
+  searchClearBtn: {
+    width: 32,
+    height: 32,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  searchClearText: {
+    fontSize: 14,
+    fontWeight: 'bold',
   },
   searchBtn: {
-    backgroundColor: '#00AEEF',
-    paddingHorizontal: 14,
+    height: 44,
+    minWidth: 74,
+    paddingHorizontal: 16,
     justifyContent: 'center',
-    borderRadius: 8,
+    alignItems: 'center',
+    borderRadius: 10,
   },
-  searchBtnText: { color: '#FFFFFF', fontSize: 12, fontWeight: 'bold' },
+  searchBtnText: { color: '#FFFFFF', fontSize: 13, fontWeight: 'bold' },
+  segmentWrap: {
+    paddingHorizontal: 14,
+    paddingBottom: 10,
+    borderBottomWidth: 1,
+  },
   segmentRow: {
     flexDirection: 'row',
-    backgroundColor: '#FFFFFF',
-    paddingHorizontal: 12,
-    paddingBottom: 10,
-    gap: 6,
-    borderBottomWidth: 1,
-    borderColor: '#E2E8F0',
+    borderRadius: 10,
+    padding: 3,
+    gap: 4,
   },
   segmentBtn: {
     flex: 1,
+    minHeight: 38,
     paddingVertical: 8,
     borderRadius: 8,
-    backgroundColor: '#F1F5F9',
     alignItems: 'center',
+    justifyContent: 'center',
   },
-  segmentBtnActive: { backgroundColor: '#00AEEF' },
-  segmentText: { fontSize: 12, fontWeight: '700', color: '#64748B' },
-  segmentTextActive: { color: '#FFFFFF' },
+  segmentBtnActive: {
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.08,
+    shadowRadius: 2,
+    elevation: 1,
+  },
+  segmentText: { fontSize: 12, fontWeight: '700' },
   scrollContent: { padding: 14, paddingBottom: 60 },
-  channelChip: {
-    backgroundColor: '#FFFFFF',
+  errorCard: {
     borderWidth: 1,
-    borderColor: '#CBD5E1',
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  errorCardText: { flex: 1, fontSize: 12, fontWeight: '600' },
+  retryBtn: {
     paddingHorizontal: 12,
     paddingVertical: 7,
-    borderRadius: 16,
+    borderRadius: 8,
+  },
+  retryBtnText: { color: '#FFFFFF', fontSize: 12, fontWeight: 'bold' },
+  searchSummaryBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    marginBottom: 12,
+    gap: 8,
+  },
+  searchSummaryText: { fontSize: 12, fontWeight: '600' },
+  searchSummaryClear: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  channelChip: {
+    borderWidth: 1,
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+    borderRadius: 20,
     marginRight: 8,
   },
-  channelChipActive: { backgroundColor: '#1E293B', borderColor: '#1E293B' },
-  channelChipText: { fontSize: 12, fontWeight: 'bold', color: '#334155' },
-  channelChipTextActive: { color: '#FFFFFF' },
+  channelChipText: { fontSize: 12, fontWeight: 'bold' },
   channelHeaderCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 12,
-    padding: 14,
+    borderRadius: 16,
+    padding: 16,
     marginBottom: 12,
     borderWidth: 1,
-    borderColor: '#E2E8F0',
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.06,
+    shadowRadius: 8,
+    elevation: 2,
   },
   channelTitleRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
+    gap: 8,
   },
-  channelTitle: { fontSize: 16, fontWeight: 'bold', color: '#1E293B' },
-  channelDesc: { fontSize: 12, color: '#64748B', marginTop: 4 },
+  channelTitle: { fontSize: 16, fontWeight: 'bold', flex: 1 },
+  channelDesc: { fontSize: 12, marginTop: 6, lineHeight: 17 },
   newPostBtn: {
-    backgroundColor: '#00AEEF',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 6,
+    minHeight: 40,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
+    flexShrink: 0,
   },
   newPostBtnText: { color: '#FFFFFF', fontSize: 12, fontWeight: 'bold' },
-  creatorRow: { flexDirection: 'row', gap: 8, marginTop: 10 },
+  creatorRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 12,
+  },
   creatorSmallBtn: {
-    backgroundColor: '#F1F5F9',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 6,
-  },
-  creatorSmallBtnText: { fontSize: 11, fontWeight: 'bold', color: '#0284C7' },
-  privateGateBox: {
-    backgroundColor: '#FEF3C7',
-    padding: 12,
+    minHeight: 38,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
     borderRadius: 8,
-    marginTop: 10,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
-  privateGateText: { fontSize: 12, color: '#92400E', marginBottom: 8 },
+  creatorSmallBtnText: { fontSize: 12, fontWeight: '700' },
+  privateGateBox: {
+    padding: 12,
+    borderRadius: 10,
+    marginTop: 12,
+  },
+  privateGateText: { fontSize: 12, marginBottom: 8, lineHeight: 17 },
   pendingMembershipText: {
     fontSize: 12,
     fontWeight: 'bold',
-    color: '#B45309',
   },
   joinBtn: {
-    backgroundColor: '#D97706',
-    paddingVertical: 8,
-    borderRadius: 6,
+    minHeight: 40,
+    paddingVertical: 10,
+    borderRadius: 8,
     alignItems: 'center',
+    justifyContent: 'center',
   },
   joinBtnText: { color: '#FFFFFF', fontSize: 12, fontWeight: 'bold' },
   postCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 12,
-    padding: 14,
+    borderRadius: 16,
+    padding: 16,
     marginBottom: 12,
     borderWidth: 1,
-    borderColor: '#E2E8F0',
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.06,
+    shadowRadius: 8,
+    elevation: 2,
   },
   postHeader: {
     flexDirection: 'row',
@@ -1803,7 +3656,6 @@ const baseStyles = StyleSheet.create({
     marginRight: 8,
   },
   officialAuthorBadge: {
-    backgroundColor: '#00AEEF',
     paddingHorizontal: 8,
     paddingVertical: 2,
     borderRadius: 999,
@@ -1813,193 +3665,321 @@ const baseStyles = StyleSheet.create({
     fontSize: 10,
     fontWeight: 'bold',
   },
-  postAuthor: { fontSize: 11, color: '#64748B', fontWeight: '600' },
-  deleteText: { fontSize: 11, color: '#D9534F', fontWeight: 'bold' },
+  postAuthorName: { fontSize: 12, fontWeight: '700' },
+  postTimestamp: { fontSize: 11, fontWeight: '500' },
+  deletePillBtn: {
+    minHeight: 30,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 6,
+    borderWidth: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  deleteText: { fontSize: 11, fontWeight: 'bold' },
+  searchChannelPill: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+    marginBottom: 6,
+  },
   postTitle: {
     fontSize: 15,
     fontWeight: 'bold',
-    color: '#1E293B',
     marginBottom: 4,
   },
-  postBody: { fontSize: 13, color: '#334155', lineHeight: 19 },
+  postBody: { fontSize: 13, lineHeight: 19 },
   imageTokenPlaceholder: {
-    width: 120,
-    height: 120,
-    borderRadius: 8,
+    width: 128,
+    height: 128,
+    borderRadius: 10,
     backgroundColor: '#F1F5F9',
     justifyContent: 'center',
     alignItems: 'center',
     marginRight: 8,
-    padding: 6,
+    padding: 8,
+  },
+  postImageTouchWrap: {
+    position: 'relative',
+    marginRight: 8,
   },
   postAttachedImage: {
     width: 140,
     height: 140,
-    borderRadius: 8,
-    marginRight: 8,
+    borderRadius: 10,
     backgroundColor: '#E2E8F0',
+  },
+  imageCounterBadge: {
+    position: 'absolute',
+    right: 6,
+    bottom: 6,
+    backgroundColor: 'rgba(15, 23, 42, 0.72)',
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 10,
+  },
+  imageCounterText: {
+    color: '#FFFFFF',
+    fontSize: 10,
+    fontWeight: 'bold',
   },
   postFooter: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginTop: 12,
-    paddingTop: 10,
+    marginTop: 14,
+    paddingTop: 12,
     borderTopWidth: 1,
-    borderColor: '#F1F5F9',
   },
-  voteGroup: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  voteGroup: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   voteBtn: {
-    backgroundColor: '#F1F5F9',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 6,
-  },
-  voteBtnUpActive: { backgroundColor: '#DCFCE7' },
-  voteBtnDownActive: { backgroundColor: '#FEE2E2' },
-  voteBtnText: { fontSize: 12, fontWeight: 'bold', color: '#334155' },
-  scoreText: { fontSize: 12, fontWeight: 'bold', color: '#64748B' },
-  commentBtn: {
-    backgroundColor: '#E0F2FE',
+    height: 38,
     paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 6,
-  },
-  commentBtnText: { fontSize: 12, fontWeight: 'bold', color: '#0284C7' },
-  createChannelBtn: {
-    backgroundColor: '#F0FDF4',
-    borderWidth: 1,
-    borderColor: '#16A34A',
-    borderStyle: 'dashed',
-    paddingVertical: 12,
-    borderRadius: 10,
+    borderRadius: 8,
+    justifyContent: 'center',
     alignItems: 'center',
+    borderWidth: 1,
+    borderColor: 'transparent',
+  },
+  voteBtnText: { fontSize: 12, fontWeight: 'bold' },
+  scoreText: {
+    fontSize: 12,
+    fontWeight: 'bold',
+    marginHorizontal: 2,
+  },
+  commentBtn: {
+    height: 38,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 1,
+  },
+  commentBtnText: { fontSize: 12, fontWeight: 'bold' },
+  createChannelBtn: {
+    borderWidth: 1,
+    borderStyle: 'dashed',
+    minHeight: 44,
+    paddingVertical: 12,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
     marginBottom: 12,
   },
-  createChannelBtnText: { color: '#15803D', fontSize: 13, fontWeight: 'bold' },
+  createChannelBtnText: { fontSize: 13, fontWeight: 'bold' },
   privacyBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+    flexShrink: 0,
+  },
+  privacyBadgeText: {
     fontSize: 10,
     fontWeight: 'bold',
-    color: '#0284C7',
-    backgroundColor: '#E0F2FE',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
+  },
+  channelCreatorMeta: {
+    fontSize: 11,
+    marginTop: 6,
+    fontWeight: '500',
+  },
+  directoryCardFooter: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 12,
+  },
+  directoryActionsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flexWrap: 'wrap',
+  },
+  statusPill: {
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+    borderRadius: 999,
+  },
+  statusPillText: {
+    fontSize: 11,
+    fontWeight: 'bold',
   },
   officialHeaderBanner: {
-    backgroundColor: '#1E293B',
-    padding: 14,
-    borderRadius: 12,
+    padding: 16,
+    borderRadius: 14,
     marginBottom: 12,
   },
   officialHeaderTitle: { color: '#FFFFFF', fontSize: 15, fontWeight: 'bold' },
-  officialHeaderSub: { color: '#94A3B8', fontSize: 12, marginTop: 4 },
+  officialHeaderSub: { fontSize: 12, marginTop: 4, lineHeight: 17 },
   noticeCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 12,
-    padding: 14,
+    borderRadius: 16,
+    padding: 16,
     marginBottom: 12,
     borderWidth: 1,
-    borderColor: '#BAE6FD',
     borderLeftWidth: 5,
-    borderLeftColor: '#0284C7',
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.06,
+    shadowRadius: 8,
+    elevation: 2,
   },
-  noticeCardOutbreak: {
-    borderColor: '#FCA5A5',
-    borderLeftColor: '#EF4444',
+  noticeBadgesRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginBottom: 8,
   },
-  cvoBadge: { fontSize: 11, fontWeight: 'bold', color: '#0284C7' },
-  noticePriority: { fontSize: 11, fontWeight: 'bold', color: '#B45309' },
   noticeBrgy: {
     fontSize: 12,
     fontWeight: 'bold',
-    color: '#1E293B',
     marginBottom: 4,
   },
   emptyCard: {
-    backgroundColor: '#FFFFFF',
-    padding: 24,
-    borderRadius: 12,
+    padding: 28,
+    borderRadius: 16,
+    alignItems: 'center',
+    borderWidth: 1,
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.04,
+    shadowRadius: 6,
+    elevation: 1,
+  },
+  emptyIcon: { fontSize: 32, marginBottom: 8 },
+  emptyTitle: { fontSize: 16, fontWeight: 'bold' },
+  emptySub: {
+    fontSize: 13,
+    textAlign: 'center',
+    marginTop: 6,
+    lineHeight: 18,
+  },
+  emptyActionBtn: {
+    marginTop: 14,
+    minHeight: 40,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 8,
+    justifyContent: 'center',
     alignItems: 'center',
   },
-  emptyTitle: { fontSize: 15, fontWeight: 'bold', color: '#334155' },
-  emptySub: {
-    fontSize: 12,
-    color: '#94A3B8',
-    textAlign: 'center',
-    marginTop: 4,
+  emptyActionBtnText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: 'bold',
   },
   modalOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.55)',
+    backgroundColor: 'rgba(0,0,0,0.58)',
     justifyContent: 'flex-end',
   },
   modalCard: {
-    backgroundColor: '#FFFFFF',
     borderTopLeftRadius: 20,
     borderTopRightRadius: 20,
     padding: 20,
     maxHeight: '90%',
   },
+  modalHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 8,
+  },
+  modalCloseIconBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    justifyContent: 'center',
+    alignItems: 'center',
+    flexShrink: 0,
+  },
   modalTitle: {
     fontSize: 17,
     fontWeight: 'bold',
-    color: '#1E293B',
     marginBottom: 8,
   },
   fieldLabel: {
     fontSize: 12,
     fontWeight: '700',
-    color: '#334155',
     marginBottom: 6,
     marginTop: 8,
   },
   input: {
-    backgroundColor: '#F8FAFC',
     borderWidth: 1,
-    borderColor: '#CBD5E1',
-    borderRadius: 8,
+    borderRadius: 10,
     paddingHorizontal: 12,
     paddingVertical: 10,
     fontSize: 14,
-    color: '#1E293B',
   },
   privacyChoice: {
     flex: 1,
+    minHeight: 42,
     paddingVertical: 10,
     borderWidth: 1,
-    borderColor: '#CBD5E1',
-    borderRadius: 8,
+    borderRadius: 10,
     alignItems: 'center',
+    justifyContent: 'center',
   },
-  privacyChoiceActive: { backgroundColor: '#E0F2FE', borderColor: '#00AEEF' },
-  privacyChoiceText: { fontSize: 12, fontWeight: '600', color: '#64748B' },
-  privacyChoiceTextActive: { color: '#0284C7', fontWeight: 'bold' },
+  privacyChoiceText: { fontSize: 12, fontWeight: '600' },
   attachBtn: {
-    backgroundColor: '#F8FAFC',
     borderWidth: 1,
-    borderColor: '#CBD5E1',
     borderStyle: 'dashed',
+    minHeight: 42,
     paddingVertical: 10,
-    borderRadius: 8,
+    borderRadius: 10,
     alignItems: 'center',
+    justifyContent: 'center',
     marginTop: 10,
   },
-  attachBtnText: { fontSize: 12, fontWeight: 'bold', color: '#0284C7' },
+  attachBtnText: { fontSize: 12, fontWeight: 'bold' },
+  removeImageBtn: {
+    minHeight: 28,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginTop: 2,
+  },
+  commentsScroll: {
+    flexGrow: 0,
+    flexShrink: 1,
+    marginVertical: 8,
+  },
   commentItem: {
-    backgroundColor: '#F8FAFC',
-    padding: 10,
-    borderRadius: 8,
+    padding: 12,
+    borderRadius: 10,
+    borderWidth: 1,
     marginBottom: 8,
   },
-  commentActions: { flexDirection: 'row', gap: 14, marginTop: 6 },
-  voteSmall: { fontSize: 12, fontWeight: 'bold', color: '#475569' },
-  replyLink: { fontSize: 12, fontWeight: 'bold', color: '#0284C7' },
+  replyContextText: {
+    fontSize: 11,
+    fontWeight: '700',
+    marginBottom: 4,
+  },
+  commentActions: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 8,
+  },
+  commentActionPill: {
+    minHeight: 32,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  voteSmall: { fontSize: 12, fontWeight: 'bold' },
+  replyLink: { fontSize: 12, fontWeight: 'bold' },
+  replyingBannerBox: {
+    borderWidth: 1,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    marginBottom: 6,
+  },
   replyingBanner: {
     fontSize: 11,
-    color: '#0284C7',
     fontWeight: 'bold',
-    marginBottom: 4,
   },
   modalActions: {
     flexDirection: 'row',
@@ -2009,19 +3989,47 @@ const baseStyles = StyleSheet.create({
   },
   cancelBtn: {
     flex: 1,
+    minHeight: 44,
     paddingVertical: 11,
-    borderRadius: 8,
+    borderRadius: 10,
     borderWidth: 1,
-    borderColor: '#CBD5E1',
     alignItems: 'center',
+    justifyContent: 'center',
   },
-  cancelBtnText: { color: '#64748B', fontWeight: '600' },
+  cancelBtnText: { fontWeight: '600' },
   submitBtn: {
     flex: 1.5,
-    backgroundColor: '#00AEEF',
+    minHeight: 44,
     paddingVertical: 11,
-    borderRadius: 8,
+    borderRadius: 10,
     alignItems: 'center',
+    justifyContent: 'center',
   },
   submitBtnText: { color: '#FFFFFF', fontWeight: 'bold' },
+  imagePreviewOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.92)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 16,
+  },
+  imagePreviewCloseBtn: {
+    position: 'absolute',
+    top: 48,
+    right: 20,
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 20,
+    zIndex: 10,
+  },
+  imagePreviewCloseText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: 'bold',
+  },
+  imagePreviewFull: {
+    width: '100%',
+    height: '78%',
+  },
 });

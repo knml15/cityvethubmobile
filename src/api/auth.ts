@@ -22,6 +22,8 @@ import {
   VerificationStatus,
 } from '../store/types/auth';
 import { normalizeBarangay } from '../store/types/constants';
+import { registerDevicePushTarget } from '../utils/pushNotifications';
+import { getMatchPreferences, saveMatchPreferences } from './phase422';
 
 export const authApi = {
   /**
@@ -138,6 +140,7 @@ export const authApi = {
       shareAvatarOnListings: Boolean(profileDoc?.shareAvatarOnListings),
       accountVerificationStatus: verificationStatus,
       isVerified: verificationStatus === 'verified',
+      pushNotificationsEnabled: prefs.pushNotificationsEnabled !== false,
       theme: prefs.theme === 'dark' ? 'dark' : 'light',
       contractRole,
       role: contractRole === 'officer' ? 'VET_OFFICER' : 'CITIZEN',
@@ -310,6 +313,35 @@ export const authApi = {
       ...existingPrefs,
       theme,
     });
+  },
+
+  /**
+   * Saves push notification preference in Appwrite Account prefs, registers the device push target
+   * when enabled, and best-effort syncs Pet Owner adoption matching push preferences.
+   */
+  savePushNotificationPreference: async (enabled: boolean) => {
+    const current = await account.get();
+    const existingPrefs = (current.prefs || {}) as Record<string, any>;
+    await account.updatePrefs({
+      ...existingPrefs,
+      pushNotificationsEnabled: enabled,
+    });
+
+    if (enabled) {
+      registerDevicePushTarget(current.$id).catch(() => {});
+    }
+
+    if (existingPrefs.requestedRole !== 'officer') {
+      try {
+        const prefs = await getMatchPreferences();
+        await saveMatchPreferences({
+          ...prefs,
+          pushEnabled: enabled,
+        });
+      } catch {
+        // Best-effort sync for Pet Owner adoption match preferences
+      }
+    }
   },
 
   /**

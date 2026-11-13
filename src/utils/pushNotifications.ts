@@ -2,6 +2,7 @@ import { Platform } from 'react-native';
 import * as Notifications from 'expo-notifications';
 import * as SecureStore from 'expo-secure-store';
 import { account, APPWRITE_PUSH_PROVIDER_ID } from '../api/client';
+import { useAuthStore } from '../store';
 
 try {
   Notifications.setNotificationHandler({
@@ -45,6 +46,9 @@ async function getStableTargetId(userId: string): Promise<string> {
 export async function registerDevicePushTarget(userId: string): Promise<string | null> {
   try {
     if (!userId) return null;
+    if (useAuthStore.getState().user?.pushNotificationsEnabled === false) {
+      return null;
+    }
 
     if (Platform.OS === 'android') {
       await Notifications.setNotificationChannelAsync('default', {

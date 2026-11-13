@@ -33,7 +33,7 @@ export const PUBLIC_PASSPORT_BASE_URL =
   process.env.EXPO_PUBLIC_PUBLIC_PASSPORT_BASE_URL ||
   'https://cityvethub.appwrite.network';
 export const APPWRITE_PUSH_PROVIDER_ID =
-  process.env.EXPO_PUBLIC_APPWRITE_PUSH_PROVIDER_ID || undefined;
+  process.env.EXPO_PUBLIC_APPWRITE_PUSH_PROVIDER_ID || '6af4f83a002e01081d64';
 
 // All 19 Core Tables + 6 Server-Only Community Tables
 export const TABLES = {
@@ -77,6 +77,52 @@ export const databases = new Databases(client);
 export const storage = new Storage(client);
 export const functions = new Functions(client);
 export const teams = new Teams(client);
+
+export const READ_ONLY_ACTIONS = [
+  'ping',
+  'getBreedCatalog',
+  'communityOverview',
+  'communityChannel',
+  'communityComments',
+  'communitySearch',
+  'communityImageToken',
+  'communityAvatarTokens',
+  'communityOfficialNotices',
+  'communityNotifications',
+  'getStaffPetDirectory',
+  'resolveMedicalRecorders',
+  'listOwnListingApplications',
+  'getAdoptionPreferences',
+  'resolveAdoptionApplicationNames',
+  'listUsers',
+  'openVerificationDocument',
+  'resolveReporterRoles',
+  'getIncidentReportDetails',
+  'ensurePetPassport',
+  'communityJoinRequests',
+];
+
+type DataChangedListener = (action: string) => void;
+const dataChangedListeners = new Set<DataChangedListener>();
+
+export function subscribeDataChanged(
+  listener: DataChangedListener
+): () => void {
+  dataChangedListeners.add(listener);
+  return () => {
+    dataChangedListeners.delete(listener);
+  };
+}
+
+export function emitDataChanged(action: string): void {
+  for (const listener of dataChangedListeners) {
+    try {
+      listener(action);
+    } catch {
+      // Ignore individual listener errors
+    }
+  }
+}
 
 /**
  * Synchronous privileged Function execution wrapper for `cityvethub-operations`.
@@ -132,6 +178,10 @@ export async function operate<T = any>(
       parsedBody?.error ||
         'Unable to complete the request right now. Please try again.'
     );
+  }
+
+  if (!READ_ONLY_ACTIONS.includes(action)) {
+    emitDataChanged(action);
   }
 
   return (parsedBody?.data !== undefined ? parsedBody.data : parsedBody) as T;

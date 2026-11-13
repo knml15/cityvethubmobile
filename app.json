@@ -50,8 +50,7 @@
         {
           "photosPermission": "Allow CityVetHub to access your photos to upload pet pictures, health cards, incident evidence, and verification IDs."
         }
-      ],
-      "expo-status-bar"
+      ]
     ],
     "extra": {
       "eas": {

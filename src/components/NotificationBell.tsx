@@ -10,8 +10,13 @@ import {
   ActivityIndicator,
   RefreshControl,
   Platform,
+  AppState,
 } from 'react-native';
-import { useNavigation, useFocusEffect } from '@react-navigation/native';
+import {
+  useNavigation,
+  useFocusEffect,
+  useIsFocused,
+} from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as SecureStore from 'expo-secure-store';
 import * as Notifications from 'expo-notifications';
@@ -25,6 +30,7 @@ import {
 import {
   databases,
   operate,
+  subscribeDataChanged,
   APPWRITE_DATABASE_ID,
   TABLES,
 } from '../api/client';
@@ -111,6 +117,15 @@ interface UnifiedNotificationItem {
 }
 
 const memoryReadIdsByUser: Record<string, Set<string>> = {};
+type ReadStateListener = (userId: string, nextReadIds: Set<string>) => void;
+const readStateListeners = new Set<ReadStateListener>();
+
+function broadcastReadIds(userId: string, nextSet: Set<string>) {
+  memoryReadIdsByUser[userId] = nextSet;
+  for (const listener of readStateListeners) {
+    listener(userId, nextSet);
+  }
+}
 
 function getStorageKey(userId: string): string {
   const safeId = String(userId).replace(/[^a-zA-Z0-9._-]/g, '_');
@@ -178,11 +193,107 @@ function extractExpiryDate(rec: MedicalRecordRow): string | null {
   return match ? match[1] : null;
 }
 
+function formatRelativeTime(isoString: string): string {
+  try {
+    const timestamp = new Date(isoString).getTime();
+    if (isNaN(timestamp)) return 'Recently';
+    const diffSec = Math.floor((Date.now() - timestamp) / 1000);
+    if (diffSec < 60) return 'Just now';
+    const diffMin = Math.floor(diffSec / 60);
+    if (diffMin < 60) return `${diffMin}m ago`;
+    const diffHour = Math.floor(diffMin / 60);
+    if (diffHour < 24) return `${diffHour}h ago`;
+    const diffDay = Math.floor(diffHour / 24);
+    if (diffDay === 1) return 'Yesterday';
+    if (diffDay < 7) return `${diffDay}d ago`;
+    return new Date(timestamp).toLocaleDateString();
+  } catch {
+    return 'Recently';
+  }
+}
+
+function getCategoryTagStyle(filterCategory: string) {
+  switch (filterCategory) {
+    case 'Alerts':
+      return {
+        bg: '#FEE2E2',
+        border: '#FECACA',
+        text: '#991B1B',
+        accentBorder: '#EF4444',
+      };
+    case 'Adoptions':
+      return {
+        bg: '#DCFCE7',
+        border: '#BBF7D0',
+        text: '#166534',
+        accentBorder: '#10B981',
+      };
+    case 'Medical':
+      return {
+        bg: '#E0F2FE',
+        border: '#BAE6FD',
+        text: '#0369A1',
+        accentBorder: '#0284C7',
+      };
+    case 'Community':
+    default:
+      return {
+        bg: '#F1F5F9',
+        border: '#E2E8F0',
+        text: '#475569',
+        accentBorder: '#00AEEF',
+      };
+  }
+}
+
+function getCategoryEmptyState(category: NotificationFilterCategory) {
+  switch (category) {
+    case 'Unread':
+      return {
+        emoji: '✨',
+        title: 'No unread notifications',
+        subtitle: 'You are all caught up! New alerts and notices will appear here.',
+      };
+    case 'Alerts':
+      return {
+        emoji: '🛡️',
+        title: 'No active health alerts',
+        subtitle: 'No disease outbreak alerts or pending surveillance reports in your area.',
+      };
+    case 'Adoptions':
+      return {
+        emoji: '🐾',
+        title: 'No adoption notifications',
+        subtitle: 'No pending adoption applications, transfers, or matching companion listings.',
+      };
+    case 'Medical':
+      return {
+        emoji: '💉',
+        title: 'Medical records up to date',
+        subtitle: 'All veterinary clinical logs, vaccinations, and health reminders are clear.',
+      };
+    case 'Community':
+      return {
+        emoji: '💬',
+        title: 'No community notices',
+        subtitle: 'No new discussion replies, channel join requests, or CVO announcements.',
+      };
+    case 'All':
+    default:
+      return {
+        emoji: '🎉',
+        title: "You're all caught up!",
+        subtitle: 'New community activity, adoption updates, medical reminders, and CVO advisories will appear here.',
+      };
+  }
+}
+
 export default function NotificationBell() {
   const styles = useThemedStyles(baseStyles);
   const colors = useAppPalette();
   const insets = useSafeAreaInsets();
   const navigation = useNavigation<any>();
+  const isFocused = useIsFocused();
 
   const { user } = useAuthStore();
   const {
@@ -226,26 +337,41 @@ export default function NotificationBell() {
     return new Set();
   });
 
+  // Subscribe to cross-screen readIds broadcasts across all mounted bell instances
+  useEffect(() => {
+    if (!user?.id) return;
+    const targetUid = String(user.id);
+    const onReadIdsChanged: ReadStateListener = (uid, nextSet) => {
+      if (String(uid) === targetUid) {
+        setReadIds(new Set(nextSet));
+      }
+    };
+    readStateListeners.add(onReadIdsChanged);
+    return () => {
+      readStateListeners.delete(onReadIdsChanged);
+    };
+  }, [user?.id]);
+
   // Load persisted readIds for the current user
   useEffect(() => {
     if (!user?.id) return;
     let active = true;
-    const cached = memoryReadIdsByUser[user.id];
+    const uid = String(user.id);
+    const cached = memoryReadIdsByUser[uid];
     if (cached) {
       setReadIds(new Set(cached));
     }
-    SecureStore.getItemAsync(getStorageKey(user.id))
+    SecureStore.getItemAsync(getStorageKey(uid))
       .then((raw) => {
         if (!active || !raw) return;
         try {
           const parsed = JSON.parse(raw);
           if (Array.isArray(parsed)) {
             const merged = new Set<string>([
-              ...(memoryReadIdsByUser[user.id] || []),
+              ...(memoryReadIdsByUser[uid] || []),
               ...parsed.map(String),
             ]);
-            memoryReadIdsByUser[user.id] = merged;
-            setReadIds(merged);
+            broadcastReadIds(uid, merged);
           }
         } catch {
           // Ignore malformed persisted set
@@ -260,12 +386,14 @@ export default function NotificationBell() {
   const persistReadIds = useCallback(
     async (nextSet: Set<string>) => {
       if (!user?.id) return;
-      memoryReadIdsByUser[user.id] = nextSet;
-      setReadIds(new Set(nextSet));
+      const uid = String(user.id);
+      const existing = memoryReadIdsByUser[uid] || new Set<string>();
+      const merged = new Set<string>([...existing, ...nextSet]);
+      broadcastReadIds(uid, merged);
       try {
         await SecureStore.setItemAsync(
-          getStorageKey(user.id),
-          JSON.stringify(Array.from(nextSet).slice(-400))
+          getStorageKey(uid),
+          JSON.stringify(Array.from(merged).slice(-400))
         );
       } catch {
         // Best-effort persistence
@@ -274,10 +402,10 @@ export default function NotificationBell() {
     [user?.id]
   );
 
-  const refreshNotifications = useCallback(async () => {
+  const refreshNotifications = useCallback(async (silent = false) => {
     if (!user?.id) return;
     const uid = String(user.id);
-    setIsLoading(true);
+    if (!silent) setIsLoading(true);
     try {
       // 1. Community Social & Official Notices (`communityNotifications` with fallback to `communityOfficialNotices`)
       const fetchCommunity = async () => {
@@ -314,7 +442,7 @@ export default function NotificationBell() {
       if (isOfficer) {
         const [, , reportsRes, medRes, petsRes] = await Promise.all([
           fetchCommunity(),
-          fetchDiseaseAlerts().catch(() => {}),
+          fetchDiseaseAlerts(true).catch(() => {}),
           databases
             .listDocuments(APPWRITE_DATABASE_ID, TABLES.DISEASE_REPORTS, [
               Query.equal('status', 'pending'),
@@ -362,8 +490,8 @@ export default function NotificationBell() {
         ] = await Promise.all([
           fetchCommunity(),
           getMatchNotifications().catch(() => []),
-          fetchIncomingApplications().catch(() => {}),
-          fetchMyApplications().catch(() => {}),
+          fetchIncomingApplications(true).catch(() => {}),
+          fetchMyApplications(true).catch(() => {}),
           databases
             .listDocuments(APPWRITE_DATABASE_ID, TABLES.PET_PROFILES, [
               Query.equal('ownerId', uid),
@@ -467,7 +595,7 @@ export default function NotificationBell() {
         }
       }
     } finally {
-      setIsLoading(false);
+      if (!silent) setIsLoading(false);
     }
   }, [
     user?.id,
@@ -479,22 +607,62 @@ export default function NotificationBell() {
 
   // Refresh on mount
   useEffect(() => {
-    refreshNotifications();
+    refreshNotifications(true);
   }, [refreshNotifications]);
 
   // Refresh when screen focuses
   useFocusEffect(
     useCallback(() => {
-      refreshNotifications();
-    }, [refreshNotifications])
+      if (user?.id && memoryReadIdsByUser[String(user.id)]) {
+        setReadIds(new Set(memoryReadIdsByUser[String(user.id)]));
+      }
+      refreshNotifications(true);
+    }, [user?.id, refreshNotifications])
   );
+
+  // Live background sync (mutation broadcast + 15s interval + foreground resume)
+  useEffect(() => {
+    if (!isFocused || !user?.id || visible) return;
+
+    let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+    let currentAppState = AppState.currentState;
+
+    const unsubscribeMutation = subscribeDataChanged(() => {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        if (AppState.currentState === 'active') {
+          refreshNotifications(true);
+        }
+      }, 300);
+    });
+
+    const intervalId = setInterval(() => {
+      if (AppState.currentState === 'active' && !isLoading) {
+        refreshNotifications(true);
+      }
+    }, 15000);
+
+    const appStateSub = AppState.addEventListener('change', (nextState) => {
+      if (currentAppState !== 'active' && nextState === 'active') {
+        refreshNotifications(true);
+      }
+      currentAppState = nextState;
+    });
+
+    return () => {
+      unsubscribeMutation();
+      clearInterval(intervalId);
+      appStateSub.remove();
+      if (debounceTimer) clearTimeout(debounceTimer);
+    };
+  }, [isFocused, user?.id, visible, isLoading, refreshNotifications]);
 
   // Refresh when a push notification arrives in the foreground
   useEffect(() => {
     let receivedSub: Notifications.EventSubscription | null = null;
     try {
       receivedSub = Notifications.addNotificationReceivedListener(() => {
-        refreshNotifications();
+        refreshNotifications(true);
       });
     } catch {
       // Ignore if notifications listener is unavailable in Expo Go
@@ -510,6 +678,9 @@ export default function NotificationBell() {
 
   // Refresh when modal opens
   const handleOpenModal = () => {
+    if (user?.id && memoryReadIdsByUser[String(user.id)]) {
+      setReadIds(new Set(memoryReadIdsByUser[String(user.id)]));
+    }
     setVisible(true);
     refreshNotifications();
   };
@@ -523,6 +694,9 @@ export default function NotificationBell() {
       seenIds.add(item.id);
       list.push(item);
     };
+
+    const stripBarangayTag = (text: string) =>
+      String(text || '').replace(/^\[Barangay:\s*([^\]]+)\]\s*\n?/i, '').trim();
 
     // 1. Community Social & Notices (`communityNotifications`)
     for (const raw of communityNotifs) {
@@ -557,6 +731,12 @@ export default function NotificationBell() {
       } else if (nType === 'join_status') {
         categoryLabel = '🔓 CHANNEL MEMBERSHIP';
         communityTab = 'channels';
+      } else if (nType === 'channel_deleted') {
+        categoryLabel = '🗑️ CHANNEL DELETED';
+        communityTab = 'channels';
+      } else if (nType === 'post_deleted') {
+        categoryLabel = '🗑️ DISCUSSION DELETED';
+        communityTab = 'feed';
       } else if (
         nType.includes('outbreak') ||
         nType.includes('alert') ||
@@ -585,7 +765,18 @@ export default function NotificationBell() {
           ? `Join request for #${raw.channelName || 'channel'}`
           : nType === 'join_status'
           ? `Channel membership update: #${raw.channelName || 'channel'}`
+          : nType === 'channel_deleted'
+          ? `Channel #${raw.channelName || 'channel'} was deleted`
+          : nType === 'post_deleted'
+          ? `Discussion "${raw.postTitle || 'post'}" was removed`
           : 'Community Update';
+
+      const rawSubtitle =
+        raw.body ||
+        raw.message ||
+        raw.subtitle ||
+        raw.postTitle ||
+        (raw.channelName ? `Channel: #${raw.channelName}` : 'Tap to open in Community');
 
       pushUnique({
         id: itemId,
@@ -593,20 +784,21 @@ export default function NotificationBell() {
         filterCategory,
         categoryLabel,
         title: raw.title || defaultTitle,
-        subtitle:
-          raw.body ||
-          raw.message ||
-          raw.subtitle ||
-          raw.postTitle ||
-          (raw.channelName ? `Channel: #${raw.channelName}` : 'Tap to open in Community'),
+        subtitle: stripBarangayTag(rawSubtitle),
         timestamp:
           raw.createdAt ||
           raw.$createdAt ||
           raw.date ||
           new Date().toISOString(),
         isRead: Boolean(raw.isRead) || readIds.has(itemId),
-        channelId: raw.channelId ? String(raw.channelId) : undefined,
-        postId: raw.postId ? String(raw.postId) : undefined,
+        channelId:
+          raw.channelId && nType !== 'channel_deleted'
+            ? String(raw.channelId)
+            : undefined,
+        postId:
+          raw.postId && nType !== 'post_deleted' && nType !== 'channel_deleted'
+            ? String(raw.postId)
+            : undefined,
         communityTab,
       });
     }
@@ -618,6 +810,7 @@ export default function NotificationBell() {
         notice.category === 'outbreak' ||
         notice.priority === 'high' ||
         notice.priority === 'medium';
+      const cleanedBody = stripBarangayTag(notice.body);
       pushUnique({
         id: itemId,
         kind: 'notice',
@@ -628,7 +821,7 @@ export default function NotificationBell() {
         title: notice.title,
         subtitle: `${
           notice.barangay ? `Brgy. ${notice.barangay} • ` : ''
-        }${notice.body}`,
+        }${cleanedBody}`,
         timestamp: notice.date || new Date().toISOString(),
         isRead: readIds.has(itemId),
         communityTab: 'notices',
@@ -932,23 +1125,64 @@ export default function NotificationBell() {
     return items.filter((i) => i.filterCategory === selectedFilter);
   }, [items, selectedFilter]);
 
+  const filterCounts = useMemo(() => {
+    return {
+      All: items.length,
+      Unread: items.filter((i) => !i.isRead).length,
+      Community: items.filter((i) => i.filterCategory === 'Community').length,
+      Adoptions: items.filter((i) => i.filterCategory === 'Adoptions').length,
+      Medical: items.filter((i) => i.filterCategory === 'Medical').length,
+      Alerts: items.filter((i) => i.filterCategory === 'Alerts').length,
+    };
+  }, [items]);
+
+  const [isMarkingAllRead, setIsMarkingAllRead] = useState(false);
+
   const handleMarkAllAsRead = async () => {
+    if (isMarkingAllRead || unreadCount === 0) return;
+    setIsMarkingAllRead(true);
     const next = new Set<string>(readIds);
     for (const item of items) {
       next.add(item.id);
     }
+    setReadIds(next);
+
+    try {
+      await persistReadIds(next);
+
+      if (!isOfficer) {
+        const unreadMatches = matchAlerts.filter((m) => !m.isRead);
+        if (unreadMatches.length > 0) {
+          setMatchAlerts((prev) => prev.map((m) => ({ ...m, isRead: true })));
+          await Promise.all(
+            unreadMatches.map((m) =>
+              readMatchNotification(m.$id).catch(() => {})
+            )
+          );
+        }
+      }
+    } finally {
+      setIsMarkingAllRead(false);
+    }
+  };
+
+  const handleMarkItemAsRead = async (
+    item: UnifiedNotificationItem,
+    e?: any
+  ) => {
+    e?.stopPropagation?.();
+    const next = new Set<string>(readIds);
+    next.add(item.id);
+    setReadIds(next);
     await persistReadIds(next);
 
-    if (!isOfficer) {
-      const unreadMatches = matchAlerts.filter((m) => !m.isRead);
-      if (unreadMatches.length > 0) {
-        setMatchAlerts((prev) => prev.map((m) => ({ ...m, isRead: true })));
-        await Promise.all(
-          unreadMatches.map((m) =>
-            readMatchNotification(m.$id).catch(() => {})
-          )
-        );
-      }
+    if (item.kind === 'match' && item.matchNote && !item.matchNote.isRead) {
+      setMatchAlerts((prev) =>
+        prev.map((m) =>
+          m.$id === item.matchNote!.$id ? { ...m, isRead: true } : m
+        )
+      );
+      readMatchNotification(item.matchNote.$id).catch(() => {});
     }
   };
 
@@ -1039,7 +1273,13 @@ export default function NotificationBell() {
       if (isOfficer) {
         navigation.navigate('FieldLookup');
       } else {
-        navigation.navigate('UserProfile');
+        const targetTab =
+          item.kind === 'application'
+            ? 'applications'
+            : item.kind === 'verification'
+            ? 'verification'
+            : 'pets';
+        navigation.navigate('UserProfile', { tab: targetTab });
       }
     }
   };
@@ -1093,17 +1333,29 @@ export default function NotificationBell() {
             </View>
 
             <View style={styles.headerActions}>
-              {unreadCount > 0 && (
+              {unreadCount > 0 ? (
                 <TouchableOpacity
-                  style={styles.markReadBtn}
+                  style={[
+                    styles.markReadBtn,
+                    isMarkingAllRead && { opacity: 0.6 },
+                  ]}
                   onPress={handleMarkAllAsRead}
+                  disabled={isMarkingAllRead}
+                  activeOpacity={0.75}
                 >
-                  <Text style={styles.markReadText}>Mark all as read</Text>
+                  <Text style={styles.markReadText}>
+                    {isMarkingAllRead ? 'Marking read...' : 'Mark all as read'}
+                  </Text>
                 </TouchableOpacity>
-              )}
+              ) : items.length > 0 ? (
+                <View style={styles.allReadBadge}>
+                  <Text style={styles.allReadText}>✓ All read</Text>
+                </View>
+              ) : null}
               <TouchableOpacity
                 style={styles.closeBtn}
                 onPress={() => setVisible(false)}
+                activeOpacity={0.75}
               >
                 <Text style={styles.closeBtnText}>Close</Text>
               </TouchableOpacity>
@@ -1119,6 +1371,7 @@ export default function NotificationBell() {
             >
               {FILTER_CATEGORIES.map((cat) => {
                 const isActive = selectedFilter === cat;
+                const count = filterCounts[cat] || 0;
                 return (
                   <TouchableOpacity
                     key={cat}
@@ -1127,6 +1380,7 @@ export default function NotificationBell() {
                       isActive && styles.filterPillActive,
                     ]}
                     onPress={() => setSelectedFilter(cat)}
+                    activeOpacity={0.75}
                   >
                     <Text
                       style={[
@@ -1135,9 +1389,7 @@ export default function NotificationBell() {
                       ]}
                     >
                       {cat}
-                      {cat === 'Unread' && unreadCount > 0
-                        ? ` (${unreadCount})`
-                        : ''}
+                      {count > 0 ? ` (${count})` : ''}
                     </Text>
                   </TouchableOpacity>
                 );
@@ -1160,45 +1412,83 @@ export default function NotificationBell() {
                   onRefresh={refreshNotifications}
                 />
               }
-              ListEmptyComponent={
-                <View style={styles.emptyBox}>
-                  <Text style={styles.emptyEmoji}>🎉</Text>
-                  <Text style={styles.emptyTitle}>
-                    You're all caught up!
-                  </Text>
-                  <Text style={styles.emptySub}>
-                    {selectedFilter === 'All'
-                      ? 'New community activity, adoption updates, medical reminders, and CVO advisories will appear here.'
-                      : `No notifications in "${selectedFilter}" right now.`}
-                  </Text>
-                </View>
-              }
-              renderItem={({ item }) => (
-                <TouchableOpacity
-                  style={[
-                    styles.card,
-                    !item.isRead && styles.cardUnread,
-                  ]}
-                  activeOpacity={0.8}
-                  onPress={() => handlePressItem(item)}
-                >
-                  <View style={styles.cardHeaderRow}>
-                    <Text style={styles.categoryLabel}>
-                      {item.categoryLabel}
-                    </Text>
-                    <View style={styles.statusRow}>
-                      {!item.isRead && <View style={styles.unreadDot} />}
-                      <Text style={styles.timeText}>
-                        {new Date(item.timestamp).toLocaleDateString()}
-                      </Text>
-                    </View>
+              ListEmptyComponent={() => {
+                const emptyMeta = getCategoryEmptyState(selectedFilter);
+                return (
+                  <View style={styles.emptyBox}>
+                    <Text style={styles.emptyEmoji}>{emptyMeta.emoji}</Text>
+                    <Text style={styles.emptyTitle}>{emptyMeta.title}</Text>
+                    <Text style={styles.emptySub}>{emptyMeta.subtitle}</Text>
                   </View>
-                  <Text style={styles.cardTitle}>{item.title}</Text>
-                  <Text style={styles.cardSub} numberOfLines={3}>
-                    {item.subtitle}
-                  </Text>
-                </TouchableOpacity>
-              )}
+                );
+              }}
+              renderItem={({ item }) => {
+                const tagMeta = getCategoryTagStyle(item.filterCategory);
+                return (
+                  <TouchableOpacity
+                    style={[
+                      styles.card,
+                      !item.isRead && [
+                        styles.cardUnread,
+                        { borderLeftColor: tagMeta.accentBorder },
+                      ],
+                    ]}
+                    activeOpacity={0.8}
+                    onPress={() => handlePressItem(item)}
+                  >
+                    <View style={styles.cardHeaderRow}>
+                      <View
+                        style={[
+                          styles.categoryBadge,
+                          {
+                            backgroundColor: tagMeta.bg,
+                            borderColor: tagMeta.border,
+                          },
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.categoryLabel,
+                            { color: tagMeta.text },
+                          ]}
+                        >
+                          {item.categoryLabel}
+                        </Text>
+                      </View>
+                      <View style={styles.statusRow}>
+                        {!item.isRead ? (
+                          <TouchableOpacity
+                            style={styles.inlineMarkReadBtn}
+                            onPress={(e) => handleMarkItemAsRead(item, e)}
+                            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                            accessibilityRole="button"
+                            accessibilityLabel="Mark notification as read"
+                          >
+                            <View style={styles.unreadDot} />
+                            <Text style={styles.inlineMarkReadText}>
+                              Mark read
+                            </Text>
+                          </TouchableOpacity>
+                        ) : null}
+                        <Text style={styles.timeText}>
+                          {formatRelativeTime(item.timestamp)}
+                        </Text>
+                      </View>
+                    </View>
+                    <Text
+                      style={[
+                        styles.cardTitle,
+                        !item.isRead && styles.cardTitleUnread,
+                      ]}
+                    >
+                      {item.title}
+                    </Text>
+                    <Text style={styles.cardSub} numberOfLines={3}>
+                      {item.subtitle}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              }}
             />
           )}
         </View>
@@ -1210,8 +1500,9 @@ export default function NotificationBell() {
 const baseStyles = StyleSheet.create({
   bellButton: {
     position: 'relative',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
+    minWidth: 44,
+    minHeight: 44,
+    paddingHorizontal: 8,
     justifyContent: 'center',
     alignItems: 'center',
   },
@@ -1220,7 +1511,7 @@ const baseStyles = StyleSheet.create({
   },
   badge: {
     position: 'absolute',
-    top: 2,
+    top: 4,
     right: 4,
     minWidth: 18,
     height: 18,
@@ -1269,13 +1560,28 @@ const baseStyles = StyleSheet.create({
   },
   markReadBtn: {
     backgroundColor: '#E0F2FE',
-    paddingHorizontal: 10,
+    paddingHorizontal: 12,
     paddingVertical: 7,
     borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#BAE6FD',
   },
   markReadText: {
     color: '#0284C7',
     fontSize: 12,
+    fontWeight: '700',
+  },
+  allReadBadge: {
+    backgroundColor: '#DCFCE7',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#BBF7D0',
+  },
+  allReadText: {
+    color: '#166534',
+    fontSize: 11,
     fontWeight: '700',
   },
   closeBtn: {
@@ -1283,6 +1589,8 @@ const baseStyles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 7,
     borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
   },
   closeBtnText: {
     color: '#334155',
@@ -1324,17 +1632,17 @@ const baseStyles = StyleSheet.create({
     paddingBottom: 36,
   },
   emptyBox: {
-    marginTop: 60,
+    marginTop: 40,
     backgroundColor: '#FFFFFF',
-    borderRadius: 14,
+    borderRadius: 16,
     padding: 28,
     alignItems: 'center',
     borderWidth: 1,
     borderColor: '#E2E8F0',
   },
   emptyEmoji: {
-    fontSize: 36,
-    marginBottom: 8,
+    fontSize: 40,
+    marginBottom: 10,
   },
   emptyTitle: {
     fontSize: 16,
@@ -1350,7 +1658,7 @@ const baseStyles = StyleSheet.create({
   },
   card: {
     backgroundColor: '#FFFFFF',
-    borderRadius: 12,
+    borderRadius: 14,
     padding: 14,
     marginBottom: 10,
     borderWidth: 1,
@@ -1359,39 +1667,66 @@ const baseStyles = StyleSheet.create({
   cardUnread: {
     borderLeftWidth: 4,
     borderLeftColor: '#00AEEF',
-    backgroundColor: '#F0F9FF',
+    backgroundColor: '#F8FAFF',
   },
   cardHeaderRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 4,
+    marginBottom: 6,
+  },
+  categoryBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+    borderWidth: 1,
   },
   categoryLabel: {
-    fontSize: 11,
+    fontSize: 10,
     fontWeight: '800',
-    color: '#0284C7',
+    letterSpacing: 0.3,
   },
   statusRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    gap: 8,
+  },
+  inlineMarkReadBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: '#F1F5F9',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
   },
   unreadDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
     backgroundColor: '#EF4444',
+  },
+  inlineMarkReadText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#475569',
   },
   timeText: {
     fontSize: 11,
     color: '#64748B',
+    fontWeight: '500',
   },
   cardTitle: {
     fontSize: 14,
     fontWeight: '700',
     color: '#0F172A',
-    marginBottom: 3,
+    marginBottom: 4,
+  },
+  cardTitleUnread: {
+    fontWeight: '800',
+    color: '#0F172A',
   },
   cardSub: {
     fontSize: 12,

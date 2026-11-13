@@ -26,3 +26,5 @@ build-config.txt
 Thumbs.db
 *.swp
 *.swo
+
+.expo/

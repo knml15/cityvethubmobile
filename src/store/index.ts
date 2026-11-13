@@ -36,10 +36,11 @@ interface AuthStoreState {
   }) => Promise<void>;
   logout: () => Promise<void>;
   setTheme: (theme: 'light' | 'dark') => Promise<void>;
+  setPushNotifications: (enabled: boolean) => Promise<void>;
   refreshSession: () => Promise<void>;
 }
 
-export const useAuthStore = create<AuthStoreState>((set) => ({
+export const useAuthStore = create<AuthStoreState>((set, get) => ({
   user: null,
   token: null,
   isAuthenticated: false,
@@ -133,8 +134,24 @@ export const useAuthStore = create<AuthStoreState>((set) => ({
     }
   },
 
+  setPushNotifications: async (enabled) => {
+    const previous = useAuthStore.getState().user;
+    if (!previous) return;
+    set({ user: { ...previous, pushNotificationsEnabled: enabled } });
+    try {
+      await authApi.savePushNotificationPreference(enabled);
+    } catch (error) {
+      set({ user: previous });
+      throw error;
+    }
+  },
+
   refreshSession: async () => {
-    set({ isRestoring: true });
+    // Only show the full-screen splash loader on cold app boot if not yet authenticated.
+    // Avoid flipping isRestoring: true during active session updates so AppNavigator does not unmount.
+    if (!get().isAuthenticated) {
+      set({ isRestoring: true });
+    }
     try {
       const profile = await authApi.resolveCurrentUser();
       if (profile.contractRole === 'pending_officer') {
@@ -187,30 +204,30 @@ export const useAdoptionStore = create<AdoptionState>((set, get) => ({
   incomingApplications: [],
   isLoading: false,
 
-  fetchAvailablePets: async () => {
-    set({ isLoading: true });
+  fetchAvailablePets: async (silent?: boolean) => {
+    if (!silent) set({ isLoading: true });
     try {
       const listings = await adoptionApi.getAvailablePets();
-      set({ availablePets: listings, isLoading: false });
+      set({ availablePets: listings, ...(!silent ? { isLoading: false } : {}) });
     } catch (error) {
       console.error('Appwrite fetchAvailablePets error:', error);
-      set({ isLoading: false });
+      if (!silent) set({ isLoading: false });
     }
   },
 
-  fetchMyApplications: async () => {
-    set({ isLoading: true });
+  fetchMyApplications: async (silent?: boolean) => {
+    if (!silent) set({ isLoading: true });
     try {
       const apps = await adoptionApi.getMyApplications();
-      set({ myApplications: apps, isLoading: false });
+      set({ myApplications: apps, ...(!silent ? { isLoading: false } : {}) });
     } catch (error) {
       console.error('Appwrite fetchMyApplications error:', error);
-      set({ isLoading: false });
+      if (!silent) set({ isLoading: false });
     }
   },
 
-  fetchIncomingApplications: async () => {
-    set({ isLoading: true });
+  fetchIncomingApplications: async (silent?: boolean) => {
+    if (!silent) set({ isLoading: true });
     try {
       const res = await operate<any>('listOwnListingApplications', {});
       const rawList: any[] = Array.isArray(res)
@@ -240,10 +257,10 @@ export const useAdoptionStore = create<AdoptionState>((set, get) => ({
         applied_at: doc.submittedAt || doc.$createdAt,
       }));
 
-      set({ incomingApplications: mapped, isLoading: false });
+      set({ incomingApplications: mapped, ...(!silent ? { isLoading: false } : {}) });
     } catch (error) {
       console.warn('listOwnListingApplications warning:', error);
-      set({ isLoading: false });
+      if (!silent) set({ isLoading: false });
     }
   },
 
@@ -319,8 +336,8 @@ export const useSurveillanceStore = create<SurveillanceState>((set) => ({
   heatMapData: [],
   isLoading: false,
 
-  fetchDiseaseAlerts: async () => {
-    set({ isLoading: true });
+  fetchDiseaseAlerts: async (silent?: boolean) => {
+    if (!silent) set({ isLoading: true });
     try {
       const alerts = await diseaseApi.getActiveAlerts();
       const coords = alerts.map((a) => ({
@@ -330,11 +347,11 @@ export const useSurveillanceStore = create<SurveillanceState>((set) => ({
       set({
         activeAlerts: alerts,
         heatMapData: coords,
-        isLoading: false,
+        ...(!silent ? { isLoading: false } : {}),
       });
     } catch (error) {
       console.error('Appwrite fetchDiseaseAlerts error:', error);
-      set({ isLoading: false });
+      if (!silent) set({ isLoading: false });
     }
   },
 
@@ -353,8 +370,8 @@ export const useSurveillanceStore = create<SurveillanceState>((set) => ({
     }
   },
 
-  fetchStaffReports: async () => {
-    set({ isLoading: true });
+  fetchStaffReports: async (silent?: boolean) => {
+    if (!silent) set({ isLoading: true });
     try {
       // Cursor pagination avoids the old 100-record cutoff on backlogged reports.
       const all: IncidentReportRow[] = [];
@@ -370,11 +387,11 @@ export const useSurveillanceStore = create<SurveillanceState>((set) => ({
       }
       set({
         staffReports: all.filter(record => String(record.status || '').toLowerCase() !== 'archived'),
-        isLoading: false,
+        ...(!silent ? { isLoading: false } : {}),
       });
     } catch (error) {
       console.warn('Could not fetch staff disease_reports:', error);
-      set({ isLoading: false });
+      if (!silent) set({ isLoading: false });
     }
   },
 

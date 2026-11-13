@@ -71,6 +71,7 @@ export interface PetHealthUploadRow extends AppwriteMeta {
   petProfileId: string;
   title: string;
   recordDate: string;
+  expiryDate?: string;
   fileId: string;
   sharePublic: boolean;
 }

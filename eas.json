@@ -17,7 +17,8 @@
         "EXPO_PUBLIC_APPWRITE_OFFICER_TEAM_ID": "cityvethub-field-officers",
         "EXPO_PUBLIC_APPWRITE_ADMIN_TEAM_ID": "cityvethub-admins",
         "EXPO_PUBLIC_ANDROID_PACKAGE": "com.cityvethub.iligan",
-        "EXPO_PUBLIC_PUBLIC_PASSPORT_BASE_URL": "https://cityvethub.appwrite.network"
+        "EXPO_PUBLIC_PUBLIC_PASSPORT_BASE_URL": "https://cityvethub.appwrite.network",
+        "EXPO_PUBLIC_APPWRITE_PUSH_PROVIDER_ID": "6af4f83a002e01081d64"
       }
     },
     "production": {
@@ -33,7 +34,8 @@
         "EXPO_PUBLIC_APPWRITE_OFFICER_TEAM_ID": "cityvethub-field-officers",
         "EXPO_PUBLIC_APPWRITE_ADMIN_TEAM_ID": "cityvethub-admins",
         "EXPO_PUBLIC_ANDROID_PACKAGE": "com.cityvethub.iligan",
-        "EXPO_PUBLIC_PUBLIC_PASSPORT_BASE_URL": "https://cityvethub.appwrite.network"
+        "EXPO_PUBLIC_PUBLIC_PASSPORT_BASE_URL": "https://cityvethub.appwrite.network",
+        "EXPO_PUBLIC_APPWRITE_PUSH_PROVIDER_ID": "6af4f83a002e01081d64"
       }
     }
   }

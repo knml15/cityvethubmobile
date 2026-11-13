@@ -86,8 +86,8 @@ export interface SurveillanceState {
   incidentCategories: IncidentCategoryRow[];
   heatMapData: Coordinates[];
   isLoading: boolean;
-  fetchDiseaseAlerts: () => Promise<void>;
+  fetchDiseaseAlerts: (silent?: boolean) => Promise<void>;
   fetchIncidentCategories: () => Promise<void>;
-  fetchStaffReports: () => Promise<void>;
+  fetchStaffReports: (silent?: boolean) => Promise<void>;
   reportIncident: (reportData: Partial<DiseaseAlert>) => Promise<void>;
 }

@@ -64,6 +64,7 @@ export interface CitizenProfile {
   shareAvatarOnListings: boolean;
   accountVerificationStatus: VerificationStatus;
   isVerified: boolean; // True ONLY when accountVerificationStatus === 'verified'
+  pushNotificationsEnabled: boolean;
   theme: 'light' | 'dark';
   contractRole: Role;
   role: LegacyRole; // Kept for backward compatibility with existing screens

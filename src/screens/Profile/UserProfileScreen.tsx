@@ -1,36 +1,39 @@
-import CallButton from '../../components/CallButton';
-import BreedPicker from '../../components/BreedPicker';
-import { useAppPalette, useThemedStyles } from '../../theme';
-import React, { useState, useEffect, useCallback } from 'react';
-import * as ImagePicker from 'expo-image-picker';
-import { Picker } from '@react-native-picker/picker';
-import { useNavigation, useFocusEffect } from '@react-navigation/native';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  View,
-  Text,
-  StyleSheet,
-  ScrollView,
-  TouchableOpacity,
-  Modal,
-  Alert,
-  TextInput,
   ActivityIndicator,
-  RefreshControl,
+  Alert,
   Image,
-  Switch,
+  Keyboard,
   KeyboardAvoidingView,
+  Modal,
   Platform,
+  RefreshControl,
+  ScrollView,
+  Share,
+  StyleSheet,
+  Switch,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
 } from 'react-native';
+import * as ImagePicker from 'expo-image-picker';
+import { useFocusEffect, useNavigation, useRoute } from '@react-navigation/native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Query } from 'react-native-appwrite';
+import CallButton from '../../components/CallButton';
+import BreedPicker, { Picker } from '../../components/BreedPicker';
+import { useAppPalette, useThemedStyles } from '../../theme';
+import { useLiveSync } from '../../utils/useLiveSync';
 import { useAuthStore, useAdoptionStore } from '../../store';
 import {
-  databases,
-  operate,
-  uploadMediaFile,
-  getMediaFileUrl,
-  getPetPassportQrUrl,
   APPWRITE_DATABASE_ID,
   TABLES,
+  databases,
+  getMediaFileUrl,
+  getPetPassportQrUrl,
+  operate,
+  uploadMediaFile,
 } from '../../api/client';
 import { authApi } from '../../api/auth';
 import {
@@ -100,10 +103,167 @@ export interface RegisteredPet {
   ancestryParent2Name?: string;
 }
 
+type SemanticPalette = {
+  successBg: string;
+  successText: string;
+  successBorder: string;
+  warningBg: string;
+  warningText: string;
+  warningBorder: string;
+  dangerBg: string;
+  dangerText: string;
+  dangerBorder: string;
+  neutralBg: string;
+  neutralText: string;
+  neutralBorder: string;
+  onPrimary: string;
+};
+
+type BadgeTone = {
+  label: string;
+  bg: string;
+  text: string;
+  border: string;
+};
+
+function formatSafeDate(raw?: string): string {
+  if (!raw) return 'Date unavailable';
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return 'Date unavailable';
+  return d.toLocaleDateString();
+}
+
+function getAccountVerifMeta(
+  status: string,
+  semantic: SemanticPalette
+): BadgeTone {
+  if (status === 'verified') {
+    return {
+      label: '✓ CVO Verified',
+      bg: semantic.successBg,
+      text: semantic.successText,
+      border: semantic.successBorder,
+    };
+  }
+  if (status === 'pending') {
+    return {
+      label: 'Pending ID Review',
+      bg: semantic.warningBg,
+      text: semantic.warningText,
+      border: semantic.warningBorder,
+    };
+  }
+  if (status === 'rejected') {
+    return {
+      label: 'ID Rejected',
+      bg: semantic.dangerBg,
+      text: semantic.dangerText,
+      border: semantic.dangerBorder,
+    };
+  }
+  return {
+    label: 'Unverified',
+    bg: semantic.neutralBg,
+    text: semantic.neutralText,
+    border: semantic.neutralBorder,
+  };
+}
+
+function getPetVerifBadgeMeta(
+  pet: RegisteredPet,
+  semantic: SemanticPalette
+): BadgeTone {
+  if (pet.verificationStatus === 'verified') {
+    return {
+      label: `CVO ID: ${pet.officialRegistryId || 'VERIFIED'}`,
+      bg: semantic.successBg,
+      text: semantic.successText,
+      border: semantic.successBorder,
+    };
+  }
+  if (pet.verificationStatus === 'pending') {
+    return {
+      label: '⏳ Pending CVO',
+      bg: semantic.warningBg,
+      text: semantic.warningText,
+      border: semantic.warningBorder,
+    };
+  }
+  if (pet.verificationStatus === 'rejected') {
+    return {
+      label: '✕ Rejected',
+      bg: semantic.dangerBg,
+      text: semantic.dangerText,
+      border: semantic.dangerBorder,
+    };
+  }
+  return {
+    label: '📝 Draft',
+    bg: semantic.neutralBg,
+    text: semantic.neutralText,
+    border: semantic.neutralBorder,
+  };
+}
+
+function getApplicationBadgeMeta(
+  rawStatus: string,
+  semantic: SemanticPalette
+): BadgeTone {
+  const st = String(rawStatus || 'PENDING').toUpperCase();
+  if (
+    st === 'APPROVED' ||
+    st === 'OWNER_APPROVED' ||
+    st === 'COMPLETED'
+  ) {
+    return {
+      label: st,
+      bg: semantic.successBg,
+      text: semantic.successText,
+      border: semantic.successBorder,
+    };
+  }
+  if (st === 'DECLINED' || st === 'REJECTED') {
+    return {
+      label: st,
+      bg: semantic.dangerBg,
+      text: semantic.dangerText,
+      border: semantic.dangerBorder,
+    };
+  }
+  return {
+    label: st === 'PENDING' ? '⏳ PENDING' : st,
+    bg: semantic.warningBg,
+    text: semantic.warningText,
+    border: semantic.warningBorder,
+  };
+}
+
 export default function UserProfileScreen() {
   const styles = useThemedStyles(baseStyles);
   const colors = useAppPalette();
+  const insets = useSafeAreaInsets();
   const { user, refreshSession } = useAuthStore();
+  const isDark = user?.theme === 'dark';
+
+  const semanticColors = useMemo<SemanticPalette>(
+    () => ({
+      successBg: isDark ? '#143326' : '#DCFCE7',
+      successText: isDark ? '#6EE7B7' : '#166534',
+      successBorder: isDark ? '#1F4D3A' : '#BBF7D0',
+      warningBg: isDark ? '#3B2B12' : '#FEF3C7',
+      warningText: isDark ? '#FCD34D' : '#92400E',
+      warningBorder: isDark ? '#5C431C' : '#FDE68A',
+      dangerBg: isDark ? '#3E1C24' : '#FEE2E2',
+      dangerText: colors.danger,
+      dangerBorder: isDark ? '#662A36' : '#FCA5A5',
+      neutralBg: colors.surfaceMuted,
+      neutralText: colors.secondary,
+      neutralBorder: colors.border,
+      onPrimary: isDark ? '#0F172A' : '#FFFFFF',
+    }),
+    [isDark, colors.danger, colors.surfaceMuted, colors.secondary, colors.border]
+  );
+
   const {
     myApplications,
     incomingApplications,
@@ -113,16 +273,42 @@ export default function UserProfileScreen() {
     confirmTransfer,
   } = useAdoptionStore();
   const navigation = useNavigation<any>();
+  const route = useRoute<any>();
 
   const [activeTab, setActiveTab] = useState<
     'pets' | 'applications' | 'verification'
   >('pets');
+
+  useEffect(() => {
+    const requestedTab = route?.params?.tab;
+    if (
+      requestedTab &&
+      (requestedTab === 'pets' ||
+        requestedTab === 'applications' ||
+        requestedTab === 'verification')
+    ) {
+      setActiveTab(requestedTab);
+    }
+  }, [route?.params?.tab]);
+
   const [selectedPetForQR, setSelectedPetForQR] =
     useState<RegisteredPet | null>(null);
 
   const [isLoadingData, setIsLoadingData] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [isUploadingAvatar, setIsUploadingAvatar] = useState(false);
+  const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
   const [isSubmittingPet, setIsSubmittingPet] = useState(false);
   const [myPets, setMyPets] = useState<RegisteredPet[]>([]);
+
+  const [avatarLoadError, setAvatarLoadError] = useState(false);
+  const [failedThumbIds, setFailedThumbIds] = useState<Record<string, boolean>>(
+    {}
+  );
+  const [qrModalImageError, setQrModalImageError] = useState(false);
+
+  const hasLoadedOnceRef = useRef(false);
 
   // Account Verification State (Gov ID + 1 Owned Pet)
   const [idCategories, setIdCategories] = useState<IdCategoryRow[]>([]);
@@ -133,19 +319,6 @@ export default function UserProfileScreen() {
   const [govIdAsset, setGovIdAsset] =
     useState<ImagePicker.ImagePickerAsset | null>(null);
   const [isSubmittingVerif, setIsSubmittingVerif] = useState(false);
-
-  // Edit Profile / Settings Modal State
-  const [isEditProfileVisible, setIsEditProfileVisible] = useState(false);
-  const [editFullName, setEditFullName] = useState(user?.fullName || '');
-  const [editPhone, setEditPhone] = useState(user?.contactNumber || '');
-  const [editAddress, setEditAddress] = useState(user?.address || '');
-  const [editBarangay, setEditBarangay] = useState<IliganBarangay>(
-    normalizeBarangay(user?.barangay)
-  );
-  const [shareAvatarOnListings, setShareAvatarOnListings] = useState<boolean>(
-    Boolean(user?.shareAvatarOnListings)
-  );
-  const [isSavingProfile, setIsSavingProfile] = useState(false);
 
   // Add Pet Inventory Modal State (`createInventoryPet`)
   const [isAddPetVisible, setIsAddPetVisible] = useState(false);
@@ -179,6 +352,14 @@ export default function UserProfileScreen() {
   const [petImageAsset, setPetImageAsset] =
     useState<ImagePicker.ImagePickerAsset | null>(null);
 
+  useEffect(() => {
+    setAvatarLoadError(false);
+  }, [user?.profileImageUrl]);
+
+  useEffect(() => {
+    setQrModalImageError(false);
+  }, [selectedPetForQR?.petProfileId]);
+
   const pickImageAsset = async (
     onPicked: (asset: ImagePicker.ImagePickerAsset) => void
   ) => {
@@ -194,108 +375,172 @@ export default function UserProfileScreen() {
     }
   };
 
-  const fetchProfileData = useCallback(async () => {
-    if (!user?.id) return;
-    setIsLoadingData(true);
+  const fetchProfileData = useCallback(
+    async (silent = false) => {
+      if (!user?.id) return;
+      if (!silent) setIsLoadingData(true);
 
-    try {
-      const profilesRes = await databases.listDocuments(
-        APPWRITE_DATABASE_ID,
-        TABLES.PET_PROFILES,
-        [
-          Query.equal('ownerId', String(user.id)),
-          Query.orderDesc('$createdAt'),
-          Query.limit(100),
-        ]
-      );
+      try {
+        const profilesRes = await databases.listDocuments(
+          APPWRITE_DATABASE_ID,
+          TABLES.PET_PROFILES,
+          [
+            Query.equal('ownerId', String(user.id)),
+            Query.orderDesc('$createdAt'),
+            Query.limit(100),
+          ]
+        );
 
-      const mappedPets: RegisteredPet[] = (
-        profilesRes.documents as unknown as PetProfileRow[]
-      ).map((doc) => {
-        const verif = doc.verificationStatus || 'draft';
-        return {
-          id: doc.$id,
-          petProfileId: doc.$id,
-          name: doc.petName || 'Companion',
-          species: doc.species === 'Cat' ? 'Cat' : 'Dog',
-          breed: doc.breed || 'Aspin',
-          color: doc.color || '',
-          sex: doc.sex === 'Female' ? 'Female' : 'Male',
-          ageYears: typeof doc.ageYears === 'number' ? doc.ageYears : 1,
-          controlNumber:
-            doc.officialRegistryId ||
-            `QR-${String(doc.$id).slice(0, 8).toUpperCase()}`,
-          officialRegistryId: doc.officialRegistryId,
-          verificationStatus: verif,
-          status:
-            verif === 'verified'
-              ? 'Registered'
-              : verif === 'pending'
-              ? 'Pending Approval'
-              : 'Vaccinated Only',
-          barangay: doc.barangay || user.barangay || 'Poblacion',
-          homeAddress: doc.homeAddress || user.address || '',
-          emergencyContact: doc.emergencyContact || user.contactNumber || '',
-          lostFoundMessage: doc.lostFoundMessage || '',
-          profileTitle: doc.profileTitle || '',
-          profileDescription: doc.profileDescription || '',
-          shareOwnerName: Boolean(doc.shareOwnerName),
-          sharePublicPhoto: Boolean(doc.sharePublicPhoto),
-          shareContact: Boolean(doc.shareContact),
-          sharePublicAddress: Boolean(doc.sharePublicAddress),
-          vaccinationStatus: doc.vaccinationStatus || 'No official record yet',
-          lastVaccinationDate:
-            doc.vaccinationStatus || 'View Passport for Clinical Logs',
-          rabiesExpiryDate:
-            verif === 'verified' ? 'CVO Verified' : 'Personal Inventory',
-          ownerName: user.fullName,
-          ownerContact: doc.emergencyContact || user.contactNumber || '',
-          photoFileId: doc.photoFileId,
-          vitalStatus: doc.vitalStatus || 'Alive',
-          ancestryParentId: doc.ancestryParentId || '',
-          ancestryParentName: doc.ancestryParentName || '',
-          ancestryParent2Id: doc.ancestryParent2Id || '',
-          ancestryParent2Name: doc.ancestryParent2Name || '',
-          photoUrl: getMediaFileUrl(doc.photoFileId),
-        };
-      });
+        const mappedPets: RegisteredPet[] = (
+          profilesRes.documents as unknown as PetProfileRow[]
+        ).map((doc) => {
+          const verif = doc.verificationStatus || 'draft';
+          return {
+            id: doc.$id,
+            petProfileId: doc.$id,
+            name: doc.petName || 'Companion',
+            species: doc.species === 'Cat' ? 'Cat' : 'Dog',
+            breed: doc.breed || 'Aspin',
+            color: doc.color || '',
+            sex: doc.sex === 'Female' ? 'Female' : 'Male',
+            ageYears: typeof doc.ageYears === 'number' ? doc.ageYears : 1,
+            controlNumber:
+              doc.officialRegistryId ||
+              `QR-${String(doc.$id).slice(0, 8).toUpperCase()}`,
+            officialRegistryId: doc.officialRegistryId,
+            verificationStatus: verif,
+            status:
+              verif === 'verified'
+                ? 'Registered'
+                : verif === 'pending'
+                ? 'Pending Approval'
+                : 'Vaccinated Only',
+            barangay: doc.barangay || user.barangay || 'Poblacion',
+            homeAddress: doc.homeAddress || user.address || '',
+            emergencyContact: doc.emergencyContact || user.contactNumber || '',
+            lostFoundMessage: doc.lostFoundMessage || '',
+            profileTitle: doc.profileTitle || '',
+            profileDescription: doc.profileDescription || '',
+            shareOwnerName: Boolean(doc.shareOwnerName),
+            sharePublicPhoto: Boolean(doc.sharePublicPhoto),
+            shareContact: Boolean(doc.shareContact),
+            sharePublicAddress: Boolean(doc.sharePublicAddress),
+            vaccinationStatus:
+              doc.vaccinationStatus || 'No official record yet',
+            lastVaccinationDate:
+              doc.vaccinationStatus || 'View Passport for Clinical Logs',
+            rabiesExpiryDate:
+              verif === 'verified' ? 'CVO Verified' : 'Personal Inventory',
+            ownerName: user.fullName,
+            ownerContact: doc.emergencyContact || user.contactNumber || '',
+            photoFileId: doc.photoFileId,
+            vitalStatus: doc.vitalStatus || 'Alive',
+            ancestryParentId: doc.ancestryParentId || '',
+            ancestryParentName: doc.ancestryParentName || '',
+            ancestryParent2Id: doc.ancestryParent2Id || '',
+            ancestryParent2Name: doc.ancestryParent2Name || '',
+            photoUrl: getMediaFileUrl(doc.photoFileId),
+          };
+        });
 
-      setMyPets(mappedPets);
-      if (mappedPets.length > 0 && !selectedVerifPetId) {
-        setSelectedVerifPetId(mappedPets[0].petProfileId);
+        setMyPets(mappedPets);
+        setFailedThumbIds({});
+        if (mappedPets.length > 0 && !selectedVerifPetId) {
+          setSelectedVerifPetId(mappedPets[0].petProfileId);
+        }
+
+        const [cats, verifReq] = await Promise.all([
+          authApi.getActiveIdCategories().catch(() => []),
+          authApi.getMyVerificationRequest(String(user.id)).catch(() => null),
+        ]);
+        setIdCategories(cats);
+        if (cats.length > 0 && !selectedIdCategoryId) {
+          setSelectedIdCategoryId(cats[0].$id);
+        }
+        setLatestVerifReq(verifReq);
+
+        await Promise.all([
+          fetchMyApplications(silent),
+          fetchIncomingApplications(silent),
+        ]);
+        setLoadError(null);
+      } catch (error: any) {
+        console.error('Error fetching profile data:', error);
+        if (!silent) {
+          setLoadError(
+            error?.message || 'Unable to sync your profile data right now.'
+          );
+        }
+      } finally {
+        if (!silent) setIsLoadingData(false);
       }
-
-      const [cats, verifReq] = await Promise.all([
-        authApi.getActiveIdCategories().catch(() => []),
-        authApi.getMyVerificationRequest(String(user.id)).catch(() => null),
-      ]);
-      setIdCategories(cats);
-      if (cats.length > 0 && !selectedIdCategoryId) {
-        setSelectedIdCategoryId(cats[0].$id);
-      }
-      setLatestVerifReq(verifReq);
-
-      await Promise.all([fetchMyApplications(), fetchIncomingApplications()]);
-    } catch (error) {
-      console.error('Error fetching profile data:', error);
-    } finally {
-      setIsLoadingData(false);
-    }
-  }, [
-    user,
-    selectedVerifPetId,
-    selectedIdCategoryId,
-    fetchMyApplications,
-    fetchIncomingApplications,
-  ]);
+    },
+    [
+      user,
+      selectedVerifPetId,
+      selectedIdCategoryId,
+      fetchMyApplications,
+      fetchIncomingApplications,
+    ]
+  );
 
   useFocusEffect(
     useCallback(() => {
-      fetchProfileData();
+      if (!hasLoadedOnceRef.current) {
+        hasLoadedOnceRef.current = true;
+        fetchProfileData(false);
+      } else {
+        fetchProfileData(true);
+      }
     }, [fetchProfileData])
   );
 
+  const handlePullRefresh = async () => {
+    setIsRefreshing(true);
+    try {
+      await fetchProfileData(true);
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
+
+  useLiveSync(() => fetchProfileData(true), {
+    enabled: !isAddPetVisible && !selectedPetForQR,
+  });
+
+  const openAddPetModal = () => {
+    Keyboard.dismiss();
+    setNewPetName('');
+    setNewPetSpecies('Dog');
+    setNewPetBreed('');
+    setNewPetColor('');
+    setNewPetSex('Male');
+    setNewPetAge('');
+    setNewPetVitalStatus('Alive');
+    setNewPetParentId('');
+    setNewPetParent2Id('');
+    setNewPetBarangay(normalizeBarangay(user?.barangay));
+    setNewPetHomeAddress(user?.address || '');
+    setNewPetEmergencyContact(user?.contactNumber || '');
+    setNewPetTitle('');
+    setNewPetDescription('');
+    setNewPetLostFoundMsg('');
+    setShareOwnerName(true);
+    setSharePublicPhoto(true);
+    setShareContact(true);
+    setSharePublicAddress(false);
+    setPetImageAsset(null);
+    setIsAddPetVisible(true);
+  };
+
+  const closeAddPetModal = () => {
+    if (isSubmittingPet) return;
+    Keyboard.dismiss();
+    setIsAddPetVisible(false);
+  };
+
   const handleCreateInventoryPet = async () => {
+    Keyboard.dismiss();
     if (!newPetName.trim() || !newPetBreed.trim() || !newPetAge.trim()) {
       Alert.alert(
         'Missing Fields',
@@ -313,24 +558,23 @@ export default function UserProfileScreen() {
       return;
     }
 
+    if (
+      newPetParentId &&
+      newPetParent2Id &&
+      newPetParentId === newPetParent2Id
+    ) {
+      Alert.alert(
+        'Invalid Ancestry',
+        'Sire (Parent 1) and Dam (Parent 2) cannot be the same pet.'
+      );
+      return;
+    }
+
     setIsSubmittingPet(true);
     try {
       let photoFileId: string | undefined;
       if (petImageAsset) {
         photoFileId = await uploadMediaFile(petImageAsset);
-      }
-
-      if (
-        newPetParentId &&
-        newPetParent2Id &&
-        newPetParentId === newPetParent2Id
-      ) {
-        Alert.alert(
-          'Invalid Ancestry',
-          'Sire (Parent 1) and Dam (Parent 2) cannot be the same pet.'
-        );
-        setIsSubmittingPet(false);
-        return;
       }
 
       await operate('createInventoryPet', {
@@ -357,19 +601,7 @@ export default function UserProfileScreen() {
       });
 
       setIsAddPetVisible(false);
-      setNewPetName('');
-      setNewPetBreed('');
-      setNewPetColor('');
-      setNewPetAge('');
-      setNewPetVitalStatus('Alive');
-      setNewPetParentId('');
-      setNewPetParent2Id('');
-      setNewPetTitle('');
-      setNewPetDescription('');
-      setNewPetLostFoundMsg('');
-      setPetImageAsset(null);
-
-      await fetchProfileData();
+      await fetchProfileData(true);
       Alert.alert(
         'Saved successfully',
         'Your pet profile and QR Passport have been created! Tap your pet card to view the QR code, upload health documents, or request official CVO verification.'
@@ -384,34 +616,11 @@ export default function UserProfileScreen() {
     }
   };
 
-  const handleSaveProfileChanges = async () => {
-    if (!editFullName.trim()) {
-      Alert.alert('Required', 'Full Name cannot be empty.');
-      return;
-    }
-    setIsSavingProfile(true);
-    try {
-      await authApi.saveProfile({
-        fullName: editFullName.trim(),
-        phone: editPhone.trim(),
-        address: editAddress.trim(),
-        barangay: editBarangay,
-      });
-      await authApi.setProfilePhotoSharing(shareAvatarOnListings);
-      await refreshSession();
-      setIsEditProfileVisible(false);
-      Alert.alert('Saved successfully', 'Your profile details have been updated.');
-    } catch (error: any) {
-      Alert.alert('Update Failed', error?.message || 'Could not save profile.');
-    } finally {
-      setIsSavingProfile(false);
-    }
-  };
-
   const handleUploadAvatar = async () => {
+    Keyboard.dismiss();
     await pickImageAsset(async (asset) => {
       try {
-        setIsLoadingData(true);
+        setIsUploadingAvatar(true);
         await authApi.uploadAndSaveAvatar(asset);
         await refreshSession();
         Alert.alert('Saved successfully', 'Your profile picture has been saved.');
@@ -421,12 +630,13 @@ export default function UserProfileScreen() {
           error?.message || 'Could not upload avatar.'
         );
       } finally {
-        setIsLoadingData(false);
+        setIsUploadingAvatar(false);
       }
     });
   };
 
   const handleSubmitAccountVerification = async () => {
+    Keyboard.dismiss();
     if (myPets.length === 0 || !selectedVerifPetId) {
       Alert.alert(
         'Pet Profile Required',
@@ -473,7 +683,7 @@ export default function UserProfileScreen() {
       }
       setGovIdAsset(null);
       await refreshSession();
-      await fetchProfileData();
+      await fetchProfileData(true);
     } catch (error: any) {
       Alert.alert(
         'Verification Error',
@@ -500,6 +710,7 @@ export default function UserProfileScreen() {
           text: decision === 'approve' ? 'Yes, Approve' : 'Yes, Decline',
           style: decision === 'decline' ? 'destructive' : 'default',
           onPress: async () => {
+            setActionLoadingId(applicationId);
             try {
               await reviewApplication(applicationId, decision);
               Alert.alert(
@@ -510,6 +721,8 @@ export default function UserProfileScreen() {
               );
             } catch (err: any) {
               Alert.alert('Error', err?.message || 'Action failed.');
+            } finally {
+              setActionLoadingId(null);
             }
           },
         },
@@ -530,9 +743,10 @@ export default function UserProfileScreen() {
           text: 'Confirm Transfer',
           style: 'default',
           onPress: async () => {
+            setActionLoadingId(applicationId);
             try {
               await confirmTransfer(applicationId);
-              await fetchProfileData();
+              await fetchProfileData(true);
               Alert.alert(
                 'Ownership Transferred',
                 `Pet ownership has been transferred to ${applicantName}.`
@@ -542,6 +756,8 @@ export default function UserProfileScreen() {
                 'Transfer Error',
                 err?.message || 'Transfer failed.'
               );
+            } finally {
+              setActionLoadingId(null);
             }
           },
         },
@@ -549,7 +765,27 @@ export default function UserProfileScreen() {
     );
   };
 
+  const handleShareQuickQr = async (pet: RegisteredPet) => {
+    const qrUrl = getPetPassportQrUrl(pet.petProfileId);
+    try {
+      await Share.share({
+        title: `${pet.name} — CityVetHub QR Passport`,
+        message: `Verify ${pet.name}'s (${pet.species} · ${pet.breed}) CityVetHub Digital Passport:\n${qrUrl}\nQR ID: ${pet.petProfileId}`,
+      });
+    } catch {
+      // Cancelled share sheet
+    }
+  };
+
   const verifStatus = user?.accountVerificationStatus || 'unverified';
+  const accountBadge = getAccountVerifMeta(verifStatus, semanticColors);
+  const isAddPetInvalid =
+    !newPetName.trim() || !newPetBreed.trim() || !newPetAge.trim();
+  const isVerifInvalid =
+    myPets.length === 0 ||
+    !selectedVerifPetId ||
+    !selectedIdCategoryId ||
+    !govIdAsset;
 
   return (
     <KeyboardAvoidingView
@@ -562,17 +798,35 @@ export default function UserProfileScreen() {
         <TouchableOpacity
           style={styles.userAvatarWrap}
           onPress={handleUploadAvatar}
+          disabled={isUploadingAvatar}
+          activeOpacity={0.8}
         >
-          {user?.profileImageUrl ? (
+          {user?.profileImageUrl && !avatarLoadError ? (
             <Image
               source={{ uri: user.profileImageUrl }}
               style={styles.userAvatarImg}
+              onError={() => setAvatarLoadError(true)}
             />
           ) : (
-            <View style={styles.userAvatar}>
-              <Text style={styles.avatarText}>
-                {user?.firstName ? user.firstName[0] : 'C'}
+            <View
+              style={[styles.userAvatar, { backgroundColor: colors.primary }]}
+            >
+              <Text
+                style={[styles.avatarText, { color: semanticColors.onPrimary }]}
+              >
+                {user?.fullName ? user.fullName[0].toUpperCase() : 'C'}
               </Text>
+            </View>
+          )}
+          {isUploadingAvatar ? (
+            <View style={styles.avatarLoadingOverlay}>
+              <ActivityIndicator color="#FFFFFF" size="small" />
+            </View>
+          ) : (
+            <View
+              style={[styles.cameraBadge, { backgroundColor: colors.primary }]}
+            >
+              <Text style={{ fontSize: 11 }}>📷</Text>
             </View>
           )}
           {verifStatus === 'verified' && (
@@ -584,55 +838,44 @@ export default function UserProfileScreen() {
 
         <View style={styles.userInfo}>
           <View style={styles.nameRow}>
-            <Text style={styles.userName}>{user?.fullName || 'Pet Owner'}</Text>
+            <Text style={styles.userName} numberOfLines={2}>
+              {user?.fullName || 'Pet Owner'}
+            </Text>
             <View
               style={[
                 styles.verifPill,
-                verifStatus === 'verified'
-                  ? styles.verifPillGreen
-                  : verifStatus === 'pending'
-                  ? styles.verifPillAmber
-                  : styles.verifPillGray,
+                {
+                  backgroundColor: accountBadge.bg,
+                  borderColor: accountBadge.border,
+                },
               ]}
             >
-              <Text
-                style={[
-                  styles.verifPillText,
-                  verifStatus === 'verified'
-                    ? { color: '#166534' }
-                    : verifStatus === 'pending'
-                    ? { color: '#B45309' }
-                    : { color: '#475569' },
-                ]}
-              >
-                {verifStatus === 'verified'
-                  ? '✓ CVO Verified'
-                  : verifStatus === 'pending'
-                  ? 'Pending ID Review'
-                  : verifStatus === 'rejected'
-                  ? 'ID Rejected'
-                  : 'Unverified'}
+              <Text style={[styles.verifPillText, { color: accountBadge.text }]}>
+                {accountBadge.label}
               </Text>
             </View>
           </View>
           <Text style={styles.userLocation}>
-            Brgy. {user?.barangay || 'Poblacion'}, Iligan City
+            📍 Brgy. {user?.barangay || 'Poblacion'}, Iligan City
           </Text>
-          <Text style={styles.userContact}>
-            {user?.contactNumber || 'No phone'} • {user?.email}
+          <Text style={styles.userContact} numberOfLines={1}>
+            📞 {user?.contactNumber || 'No phone'} • ✉️ {user?.email}
           </Text>
           <View style={styles.headerMiniActions}>
             <TouchableOpacity
-              onPress={() => {
-                setEditFullName(user?.fullName || '');
-                setEditPhone(user?.contactNumber || '');
-                setEditAddress(user?.address || '');
-                setEditBarangay(normalizeBarangay(user?.barangay));
-                setShareAvatarOnListings(Boolean(user?.shareAvatarOnListings));
-                setIsEditProfileVisible(true);
-              }}
+              style={[
+                styles.editProfileBtn,
+                {
+                  backgroundColor: colors.primaryMuted,
+                  borderColor: colors.border,
+                },
+              ]}
+              onPress={() => navigation.navigate('Settings')}
+              accessibilityRole="button"
             >
-              <Text style={styles.editProfileLink}>Edit Profile & Privacy</Text>
+              <Text style={[styles.editProfileLink, { color: colors.primary }]}>
+                ✏️ Edit Profile & Privacy
+              </Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -643,14 +886,14 @@ export default function UserProfileScreen() {
         <TouchableOpacity
           style={[
             styles.segmentBtn,
-            activeTab === 'pets' && styles.segmentBtnActive,
+            activeTab === 'pets' && { backgroundColor: colors.primary },
           ]}
           onPress={() => setActiveTab('pets')}
         >
           <Text
             style={[
               styles.segmentText,
-              activeTab === 'pets' && styles.segmentTextActive,
+              activeTab === 'pets' && { color: semanticColors.onPrimary },
             ]}
           >
             My Pets ({myPets.length})
@@ -660,14 +903,14 @@ export default function UserProfileScreen() {
         <TouchableOpacity
           style={[
             styles.segmentBtn,
-            activeTab === 'applications' && styles.segmentBtnActive,
+            activeTab === 'applications' && { backgroundColor: colors.primary },
           ]}
           onPress={() => setActiveTab('applications')}
         >
           <Text
             style={[
               styles.segmentText,
-              activeTab === 'applications' && styles.segmentTextActive,
+              activeTab === 'applications' && { color: semanticColors.onPrimary },
             ]}
           >
             Adoptions ({myApplications.length + incomingApplications.length})
@@ -677,14 +920,14 @@ export default function UserProfileScreen() {
         <TouchableOpacity
           style={[
             styles.segmentBtn,
-            activeTab === 'verification' && styles.segmentBtnActive,
+            activeTab === 'verification' && { backgroundColor: colors.primary },
           ]}
           onPress={() => setActiveTab('verification')}
         >
           <Text
             style={[
               styles.segmentText,
-              activeTab === 'verification' && styles.segmentTextActive,
+              activeTab === 'verification' && { color: semanticColors.onPrimary },
             ]}
           >
             ID Verify
@@ -695,131 +938,230 @@ export default function UserProfileScreen() {
       <ScrollView
         keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}
-        contentContainerStyle={styles.scrollContent}
+        contentContainerStyle={[
+          styles.scrollContent,
+          { paddingBottom: Math.max(120, insets.bottom + 100) },
+        ]}
         refreshControl={
           <RefreshControl
-            refreshing={isLoadingData}
-            onRefresh={fetchProfileData}
+            refreshing={isRefreshing}
+            onRefresh={handlePullRefresh}
+            colors={[colors.primary]}
+            tintColor={colors.primary}
           />
         }
       >
+        {loadError ? (
+          <View
+            style={[
+              styles.errorBanner,
+              {
+                backgroundColor: semanticColors.dangerBg,
+                borderColor: semanticColors.dangerBorder,
+              },
+            ]}
+          >
+            <Text
+              style={[styles.errorBannerText, { color: semanticColors.dangerText }]}
+            >
+              {loadError}
+            </Text>
+            <TouchableOpacity
+              onPress={() => fetchProfileData(false)}
+              style={[
+                styles.retryBtn,
+                {
+                  borderColor: semanticColors.dangerBorder,
+                  backgroundColor: colors.surface,
+                },
+              ]}
+            >
+              <Text
+                style={[styles.retryBtnText, { color: semanticColors.dangerText }]}
+              >
+                Retry
+              </Text>
+            </TouchableOpacity>
+          </View>
+        ) : null}
+
         {activeTab === 'pets' && (
           <>
             <TouchableOpacity
-              style={styles.addPetBtn}
-              onPress={() => setIsAddPetVisible(true)}
+              style={[
+                styles.addPetBtn,
+                {
+                  backgroundColor: semanticColors.successBg,
+                  borderColor: semanticColors.successBorder,
+                },
+              ]}
+              onPress={openAddPetModal}
             >
-              <Text style={styles.addPetBtnText}>
+              <Text
+                style={[
+                  styles.addPetBtnText,
+                  { color: semanticColors.successText },
+                ]}
+              >
                 + Add Companion Animal to My Pets
               </Text>
             </TouchableOpacity>
 
-            {myPets.length === 0 && !isLoadingData ? (
+            {isLoadingData && myPets.length === 0 ? (
               <View style={styles.emptyCard}>
-                <Text style={styles.emptyTitle}>No Pets in Inventory Yet</Text>
-                <Text style={styles.emptySubtitle}>
-                  Add your pet above to generate an instant QR Passport, upload
-                  health records, and request CVO verification.
+                <ActivityIndicator color={colors.primary} size="large" />
+                <Text style={[styles.emptySubtitle, { marginTop: 12 }]}>
+                  Loading your pet inventory & adoption updates...
                 </Text>
               </View>
-            ) : (
-              myPets.map((pet) => (
+            ) : myPets.length === 0 ? (
+              <View style={styles.emptyCard}>
+                <Text style={styles.emptyIcon}>🐾</Text>
+                <Text style={styles.emptyTitle}>No Pets in Inventory Yet</Text>
+                <Text style={styles.emptySubtitle}>
+                  Add your dog or cat above to generate an instant QR Passport,
+                  upload health records, and request official CVO verification.
+                </Text>
                 <TouchableOpacity
-                  key={pet.id}
-                  style={styles.petCard}
-                  activeOpacity={0.85}
-                  onPress={() =>
-                    navigation.navigate('OwnedPetPassport', { pet })
-                  }
+                  style={[
+                    styles.emptyActionBtn,
+                    { backgroundColor: colors.primary },
+                  ]}
+                  onPress={openAddPetModal}
                 >
-                  <View style={styles.cardHeaderRow}>
-                    <View style={{ flexDirection: 'row', gap: 12, flex: 1 }}>
-                      {pet.photoUrl ? (
-                        <Image
-                          source={{ uri: pet.photoUrl }}
-                          style={styles.petThumb}
-                        />
-                      ) : (
-                        <View style={styles.petThumbPlaceholder}>
-                          <Text style={{ fontSize: 22 }}>
-                            {pet.species === 'Cat' ? '🐱' : '🐶'}
+                  <Text
+                    style={[
+                      styles.emptyActionBtnText,
+                      { color: semanticColors.onPrimary },
+                    ]}
+                  >
+                    + Register Your First Pet
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            ) : (
+              myPets.map((pet) => {
+                const petBadge = getPetVerifBadgeMeta(pet, semanticColors);
+                const thumbFailed = Boolean(failedThumbIds[pet.id]);
+                return (
+                  <TouchableOpacity
+                    key={pet.id}
+                    style={styles.petCard}
+                    activeOpacity={0.85}
+                    onPress={() =>
+                      navigation.navigate('OwnedPetPassport', { pet })
+                    }
+                  >
+                    <View style={styles.cardHeaderRow}>
+                      <View style={styles.cardIdentityRow}>
+                        {pet.photoUrl && !thumbFailed ? (
+                          <Image
+                            source={{ uri: pet.photoUrl }}
+                            style={styles.petThumb}
+                            onError={() =>
+                              setFailedThumbIds((prev) => ({
+                                ...prev,
+                                [pet.id]: true,
+                              }))
+                            }
+                          />
+                        ) : (
+                          <View style={styles.petThumbPlaceholder}>
+                            <Text style={{ fontSize: 26 }}>
+                              {pet.species === 'Cat' ? '🐱' : '🐶'}
+                            </Text>
+                          </View>
+                        )}
+                        <View style={styles.cardTextCol}>
+                          <Text style={styles.petName}>{pet.name}</Text>
+                          <Text style={styles.petSubtitle}>
+                            {pet.breed} • {pet.species} • {pet.sex} •{' '}
+                            {pet.ageYears} yr(s)
+                          </Text>
+                          <Text
+                            style={[
+                              styles.petBrgyText,
+                              { color: colors.primary },
+                            ]}
+                          >
+                            📍 Brgy. {pet.barangay}
                           </Text>
                         </View>
-                      )}
-                      <View style={{ flex: 1 }}>
-                        <Text style={styles.petName}>{pet.name}</Text>
-                        <Text style={styles.petSubtitle}>
-                          {pet.breed} • {pet.species} • {pet.sex} •{' '}
-                          {pet.ageYears} yr(s)
-                        </Text>
-                        <Text style={styles.petBrgyText}>
-                          📍 Brgy. {pet.barangay}
+                      </View>
+
+                      <View
+                        style={[
+                          styles.statusBadge,
+                          {
+                            backgroundColor: petBadge.bg,
+                            borderColor: petBadge.border,
+                          },
+                        ]}
+                      >
+                        <Text
+                          style={[styles.badgeText, { color: petBadge.text }]}
+                        >
+                          {petBadge.label}
                         </Text>
                       </View>
                     </View>
 
-                    <View
-                      style={[
-                        styles.statusBadge,
-                        pet.verificationStatus === 'verified'
-                          ? styles.badgeRegistered
-                          : pet.verificationStatus === 'rejected'
-                          ? styles.badgeDraft
-                          : styles.badgePending,
-                      ]}
-                    >
-                      <Text
-                        style={[
-                          styles.badgeText,
-                          pet.verificationStatus === 'verified'
-                            ? styles.badgeTextReg
-                            : pet.verificationStatus === 'rejected'
-                            ? styles.badgeTextDraft
-                            : styles.badgeTextPending,
-                        ]}
-                      >
-                        {pet.verificationStatus === 'verified'
-                          ? `CVO ID: ${pet.officialRegistryId || 'VERIFIED'}`
-                          : pet.verificationStatus === 'rejected'
-                          ? 'Verification Rejected'
-                          : 'Pending Verification'}
-                      </Text>
+                    <View style={styles.metaCard}>
+                      <View style={styles.infoRow}>
+                        <Text style={styles.infoLabel}>QR Passport ID:</Text>
+                        <Text style={styles.infoValue} selectable>
+                          {pet.petProfileId}
+                        </Text>
+                      </View>
+                      <View style={[styles.infoRow, { marginBottom: 0 }]}>
+                        <Text style={styles.infoLabel}>
+                          Vaccination Status:
+                        </Text>
+                        <Text style={styles.infoValue}>
+                          {pet.vaccinationStatus}
+                        </Text>
+                      </View>
                     </View>
-                  </View>
 
-                  <View style={styles.divider} />
-
-                  <View style={styles.infoRow}>
-                    <Text style={styles.infoLabel}>QR Passport ID:</Text>
-                    <Text style={styles.infoValue}>{pet.petProfileId}</Text>
-                  </View>
-                  <View style={styles.infoRow}>
-                    <Text style={styles.infoLabel}>Vaccination Status:</Text>
-                    <Text style={styles.infoValue}>
-                      {pet.vaccinationStatus}
-                    </Text>
-                  </View>
-
-                  <View style={styles.cardActions}>
-                    <TouchableOpacity
-                      style={styles.qrBtn}
-                      onPress={() => setSelectedPetForQR(pet)}
-                    >
-                      <Text style={styles.qrBtnText}>📱 Show QR Passport</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      style={styles.manageBtn}
-                      onPress={() =>
-                        navigation.navigate('OwnedPetPassport', { pet })
-                      }
-                    >
-                      <Text style={styles.manageBtnText}>
-                        Manage / CVO Verify
-                      </Text>
-                    </TouchableOpacity>
-                  </View>
-                </TouchableOpacity>
-              ))
+                    <View style={styles.cardActions}>
+                      <TouchableOpacity
+                        style={[
+                          styles.qrBtn,
+                          { backgroundColor: colors.primary },
+                        ]}
+                        onPress={() => setSelectedPetForQR(pet)}
+                      >
+                        <Text
+                          style={[
+                            styles.qrBtnText,
+                            { color: semanticColors.onPrimary },
+                          ]}
+                        >
+                          📱 Show QR Passport
+                        </Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={[
+                          styles.manageBtn,
+                          { borderColor: colors.primary },
+                        ]}
+                        onPress={() =>
+                          navigation.navigate('OwnedPetPassport', { pet })
+                        }
+                      >
+                        <Text
+                          style={[
+                            styles.manageBtnText,
+                            { color: colors.primary },
+                          ]}
+                        >
+                          Manage / CVO Verify
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+                  </TouchableOpacity>
+                );
+              })
             )}
           </>
         )}
@@ -832,6 +1174,8 @@ export default function UserProfileScreen() {
             </Text>
             {incomingApplications.length === 0 ? (
               <View style={[styles.emptyCard, { marginBottom: 20 }]}>
+                <Text style={styles.emptyIcon}>📋</Text>
+                <Text style={styles.emptyTitle}>No Incoming Applications</Text>
                 <Text style={styles.emptySubtitle}>
                   No incoming applications yet. You can list an owned pet for
                   adoption from the Adoption or Pet Passport screen.
@@ -840,35 +1184,69 @@ export default function UserProfileScreen() {
             ) : (
               incomingApplications.map((inc) => {
                 const st = String(inc.status || 'PENDING').toUpperCase();
+                const appBadge = getApplicationBadgeMeta(st, semanticColors);
+                const isBusyThis = actionLoadingId === String(inc.id);
                 return (
                   <View key={String(inc.id)} style={styles.appCard}>
-                    <View style={styles.appHeader}>
-                      <Text style={styles.appName}>
-                        Applicant: {inc.applicantName}
-                      </Text>
-                      <Text style={styles.appControl}>{st}</Text>
+                    <View style={styles.appStatusRow}>
+                      <View
+                        style={[
+                          styles.statusBadge,
+                          {
+                            backgroundColor: appBadge.bg,
+                            borderColor: appBadge.border,
+                          },
+                        ]}
+                      >
+                        <Text
+                          style={[styles.badgeText, { color: appBadge.text }]}
+                        >
+                          {appBadge.label}
+                        </Text>
+                      </View>
+                      {inc.applied_at && (
+                        <Text style={styles.appDateText}>
+                          📅 {formatSafeDate(inc.applied_at)}
+                        </Text>
+                      )}
                     </View>
-                    <Text style={styles.noticeText}>
-                      🐾 Pet:{' '}
-                      {inc.petName || inc.listingTitle || 'Adoption listing'}
+
+                    <Text style={styles.applicantNameTitle}>
+                      Applicant: {inc.applicantName}
                     </Text>
-                    <Text style={styles.noticeText}>
-                      📞 Contact: {inc.contactNumber || inc.contact_number}
-                    </Text>
-                    <CallButton
-                      phone={inc.contactNumber || inc.contact_number}
-                    />
-                    <Text style={[styles.noticeText, { marginTop: 4 }]}>
-                      💬 Reason: {inc.message || inc.reason_for_adoption}
-                    </Text>
+
+                    <View style={styles.metaCard}>
+                      <Text style={styles.noticeText}>
+                        🐾 <Text style={styles.bold}>Pet:</Text>{' '}
+                        {inc.petName || inc.listingTitle || 'Adoption listing'}
+                      </Text>
+                      <View style={styles.contactRow}>
+                        <Text style={[styles.noticeText, styles.contactTextFlex]}>
+                          📞 <Text style={styles.bold}>Contact:</Text>{' '}
+                          {inc.contactNumber || inc.contact_number || 'Not provided'}
+                        </Text>
+                        <CallButton
+                          phone={inc.contactNumber || inc.contact_number}
+                        />
+                      </View>
+                      <Text style={styles.noticeText}>
+                        💬 <Text style={styles.bold}>Reason:</Text>{' '}
+                        {inc.message || inc.reason_for_adoption}
+                      </Text>
+                    </View>
 
                     {st === 'PENDING' && (
                       <View style={styles.cardActions}>
                         <TouchableOpacity
                           style={[
                             styles.manageBtn,
-                            { borderColor: '#D9534F' },
+                            {
+                              borderColor: semanticColors.dangerBorder,
+                              backgroundColor: semanticColors.dangerBg,
+                            },
+                            isBusyThis && styles.disabledBtn,
                           ]}
+                          disabled={isBusyThis}
                           onPress={() =>
                             handleReviewIncoming(
                               String(inc.id),
@@ -877,7 +1255,13 @@ export default function UserProfileScreen() {
                             )
                           }
                         >
-                          <Text style={{ color: '#D9534F', fontWeight: 'bold' }}>
+                          <Text
+                            style={{
+                              color: semanticColors.dangerText,
+                              fontWeight: '800',
+                              fontSize: 12,
+                            }}
+                          >
                             Decline
                           </Text>
                         </TouchableOpacity>
@@ -885,7 +1269,9 @@ export default function UserProfileScreen() {
                           style={[
                             styles.qrBtn,
                             { backgroundColor: '#16A34A' },
+                            isBusyThis && styles.disabledBtn,
                           ]}
+                          disabled={isBusyThis}
                           onPress={() =>
                             handleReviewIncoming(
                               String(inc.id),
@@ -894,7 +1280,13 @@ export default function UserProfileScreen() {
                             )
                           }
                         >
-                          <Text style={styles.qrBtnText}>Approve & Reserve</Text>
+                          {isBusyThis ? (
+                            <ActivityIndicator color="#FFFFFF" size="small" />
+                          ) : (
+                            <Text style={[styles.qrBtnText, { color: '#FFFFFF' }]}>
+                              Approve & Reserve
+                            </Text>
+                          )}
                         </TouchableOpacity>
                       </View>
                     )}
@@ -903,8 +1295,10 @@ export default function UserProfileScreen() {
                       <TouchableOpacity
                         style={[
                           styles.qrBtn,
-                          { backgroundColor: '#0284C7', marginTop: 12 },
+                          { backgroundColor: colors.primary, marginTop: 12 },
+                          isBusyThis && styles.disabledBtn,
                         ]}
+                        disabled={isBusyThis}
                         onPress={() =>
                           handleConfirmHandover(
                             String(inc.id),
@@ -912,9 +1306,21 @@ export default function UserProfileScreen() {
                           )
                         }
                       >
-                        <Text style={styles.qrBtnText}>
-                          🤝 Confirm Final Handover (Transfer Ownership)
-                        </Text>
+                        {isBusyThis ? (
+                          <ActivityIndicator
+                            color={semanticColors.onPrimary}
+                            size="small"
+                          />
+                        ) : (
+                          <Text
+                            style={[
+                              styles.qrBtnText,
+                              { color: semanticColors.onPrimary },
+                            ]}
+                          >
+                            🤝 Confirm Final Handover (Transfer Ownership)
+                          </Text>
+                        )}
                       </TouchableOpacity>
                     )}
                   </View>
@@ -927,6 +1333,7 @@ export default function UserProfileScreen() {
             </Text>
             {myApplications.length === 0 ? (
               <View style={styles.emptyCard}>
+                <Text style={styles.emptyIcon}>🐕</Text>
                 <Text style={styles.emptyTitle}>No Submitted Applications</Text>
                 <Text style={styles.emptySubtitle}>
                   Browse the Adoption tab to apply for an available companion
@@ -934,10 +1341,37 @@ export default function UserProfileScreen() {
                 </Text>
               </View>
             ) : (
-              myApplications.map((app) => (
-                <View key={String(app.id)} style={styles.appCard}>
-                  <View style={styles.appHeader}>
-                    <Text style={styles.appName}>
+              myApplications.map((app) => {
+                const appBadge = getApplicationBadgeMeta(
+                  app.status,
+                  semanticColors
+                );
+                return (
+                  <View key={String(app.id)} style={styles.appCard}>
+                    <View style={styles.appStatusRow}>
+                      <View
+                        style={[
+                          styles.statusBadge,
+                          {
+                            backgroundColor: appBadge.bg,
+                            borderColor: appBadge.border,
+                          },
+                        ]}
+                      >
+                        <Text
+                          style={[styles.badgeText, { color: appBadge.text }]}
+                        >
+                          {appBadge.label}
+                        </Text>
+                      </View>
+                      {app.applied_at && (
+                        <Text style={styles.appDateText}>
+                          📅 {formatSafeDate(app.applied_at)}
+                        </Text>
+                      )}
+                    </View>
+
+                    <Text style={styles.applicantNameTitle}>
                       {app.petName ||
                         app.listingTitle ||
                         `Listing #${String(app.listingId || app.pet).slice(
@@ -945,23 +1379,13 @@ export default function UserProfileScreen() {
                           8
                         )}`}
                     </Text>
-                    <Text style={styles.appControl}>{app.status}</Text>
-                  </View>
-                  <Text style={styles.noticeText}>
-                    Message: {app.reason_for_adoption || app.message}
-                  </Text>
-                  {app.applied_at && (
-                    <Text
-                      style={[
-                        styles.noticeText,
-                        { color: '#64748B', marginTop: 4 },
-                      ]}
-                    >
-                      Submitted: {new Date(app.applied_at).toLocaleDateString()}
+                    <Text style={styles.noticeText}>
+                      💬 <Text style={styles.bold}>Message:</Text>{' '}
+                      {app.reason_for_adoption || app.message}
                     </Text>
-                  )}
-                </View>
-              ))
+                  </View>
+                );
+              })
             )}
           </>
         )}
@@ -971,8 +1395,21 @@ export default function UserProfileScreen() {
             <Text style={styles.sectionHeader}>
               CVO Pet Owner Account Verification
             </Text>
-            <View style={styles.verifExplainerBanner}>
-              <Text style={styles.verifExplainerText}>
+            <View
+              style={[
+                styles.verifExplainerBanner,
+                {
+                  backgroundColor: semanticColors.successBg,
+                  borderLeftColor: semanticColors.successText,
+                },
+              ]}
+            >
+              <Text
+                style={[
+                  styles.verifExplainerText,
+                  { color: semanticColors.successText },
+                ]}
+              >
                 Why verify your account? Only CVO-Verified Pet Owners (green
                 check badge) can submit Incident Reports and publish posts,
                 comments, or votes in the Community Hub. Note: A verified pet
@@ -982,14 +1419,22 @@ export default function UserProfileScreen() {
 
             <View style={styles.infoRow}>
               <Text style={styles.infoLabel}>Current Account Status:</Text>
-              <Text style={styles.infoValue}>
-                {verifStatus.toUpperCase()}
-              </Text>
+              <Text style={styles.infoValue}>{verifStatus.toUpperCase()}</Text>
             </View>
 
             {latestVerifReq?.reviewNote ? (
-              <View style={styles.noticeBox}>
-                <Text style={styles.noticeTitle}>CVO Review Note:</Text>
+              <View
+                style={[
+                  styles.noticeBox,
+                  {
+                    backgroundColor: colors.primaryMuted,
+                    borderLeftColor: colors.primary,
+                  },
+                ]}
+              >
+                <Text style={[styles.noticeTitle, { color: colors.primary }]}>
+                  CVO Review Note:
+                </Text>
                 <Text style={styles.noticeText}>
                   {latestVerifReq.reviewNote}
                 </Text>
@@ -1002,12 +1447,19 @@ export default function UserProfileScreen() {
                   1. Select Linked Owned Pet (At Least 1 Pet Required)
                 </Text>
                 {myPets.length === 0 ? (
-                  <Text style={{ color: '#D9534F', fontSize: 12 }}>
+                  <Text
+                    style={{
+                      color: semanticColors.dangerText,
+                      fontSize: 12,
+                      marginBottom: 6,
+                    }}
+                  >
                     Please add at least 1 pet in the "My Pets" tab first.
                   </Text>
                 ) : (
                   <View style={styles.pickerBox}>
                     <Picker
+                      title="Select Linked Owned Pet"
                       selectedValue={selectedVerifPetId}
                       onValueChange={(v) => setSelectedVerifPetId(String(v))}
                       style={{ color: colors.text, width: '100%' }}
@@ -1029,6 +1481,7 @@ export default function UserProfileScreen() {
                 </Text>
                 <View style={styles.pickerBox}>
                   <Picker
+                    title="Select Government ID Type"
                     selectedValue={selectedIdCategoryId}
                     onValueChange={(v) => setSelectedIdCategoryId(String(v))}
                     style={{ color: colors.text, width: '100%' }}
@@ -1056,28 +1509,48 @@ export default function UserProfileScreen() {
                 </View>
 
                 <Text style={styles.fieldLabel}>
-                  3. Private Government ID Photo (JPG/PNG/WEBP, max 5MB)
+                  3. Private Government ID Photo (JPG/PNG/WEBP, max 5MB) *
                 </Text>
                 <TouchableOpacity
                   style={styles.uploadBtn}
                   onPress={() => pickImageAsset(setGovIdAsset)}
                 >
-                  <Text style={styles.uploadBtnText}>
+                  <Text style={[styles.uploadBtnText, { color: colors.primary }]}>
                     {govIdAsset
-                      ? '✅ Government ID Photo Selected'
+                      ? '✅ Government ID Photo Selected (Tap to Change)'
                       : '🪪 Select Private Government ID Photo'}
                   </Text>
                 </TouchableOpacity>
+                {govIdAsset?.uri ? (
+                  <View style={styles.previewRow}>
+                    <Image
+                      source={{ uri: govIdAsset.uri }}
+                      style={styles.selectedPreviewThumb}
+                    />
+                    <Text style={styles.previewCaption}>
+                      Government ID preview ready for submission
+                    </Text>
+                  </View>
+                ) : null}
 
                 <TouchableOpacity
-                  style={styles.submitBtn}
+                  style={[
+                    styles.submitBtn,
+                    { backgroundColor: colors.primary },
+                    (isSubmittingVerif || isVerifInvalid) && styles.disabledBtn,
+                  ]}
                   onPress={handleSubmitAccountVerification}
-                  disabled={isSubmittingVerif || myPets.length === 0}
+                  disabled={isSubmittingVerif || isVerifInvalid}
                 >
                   {isSubmittingVerif ? (
-                    <ActivityIndicator color="#FFFFFF" />
+                    <ActivityIndicator color={semanticColors.onPrimary} />
                   ) : (
-                    <Text style={styles.submitBtnText}>
+                    <Text
+                      style={[
+                        styles.submitBtnText,
+                        { color: semanticColors.onPrimary },
+                      ]}
+                    >
                       {latestVerifReq?.status === 'pending'
                         ? 'Replace Pending ID Document'
                         : 'Submit Account Verification'}
@@ -1095,24 +1568,40 @@ export default function UserProfileScreen() {
         visible={isAddPetVisible}
         animationType="slide"
         transparent
-        onRequestClose={() => setIsAddPetVisible(false)}
+        onRequestClose={closeAddPetModal}
       >
         <KeyboardAvoidingView
           style={styles.modalOverlay}
           behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         >
-          <View style={styles.modalCard}>
+          <View
+            style={[
+              styles.modalCard,
+              { paddingBottom: Math.max(20, insets.bottom + 8) },
+            ]}
+          >
+            <View style={styles.modalDragHandle} />
+            <View style={styles.modalHeaderRow}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.modalTitle}>Add Pet to Inventory</Text>
+                <Text style={styles.modalSubtitle}>
+                  Creates your pet profile and scannable QR Passport immediately.
+                </Text>
+              </View>
+              <TouchableOpacity
+                onPress={closeAddPetModal}
+                disabled={isSubmittingPet}
+                style={styles.modalCloseBtn}
+              >
+                <Text style={styles.modalCloseText}>✕</Text>
+              </TouchableOpacity>
+            </View>
+
             <ScrollView
               keyboardShouldPersistTaps="handled"
               showsVerticalScrollIndicator={false}
-              contentContainerStyle={{ paddingBottom: 60 }}
+              contentContainerStyle={{ paddingBottom: 40 }}
             >
-              <Text style={styles.modalTitle}>Add Pet to Inventory</Text>
-              <Text style={styles.modalSubtitle}>
-                Creates your pet profile and generates a scannable QR Passport
-                immediately.
-              </Text>
-
               <Text style={styles.fieldLabel}>Species</Text>
               <View style={styles.radioRow}>
                 {(['Dog', 'Cat'] as const).map((sp) => (
@@ -1120,7 +1609,10 @@ export default function UserProfileScreen() {
                     key={sp}
                     style={[
                       styles.radioBtn,
-                      newPetSpecies === sp && styles.radioBtnActive,
+                      newPetSpecies === sp && {
+                        borderColor: colors.primary,
+                        backgroundColor: colors.primaryMuted,
+                      },
                     ]}
                     onPress={() => {
                       setNewPetSpecies(sp);
@@ -1132,10 +1624,13 @@ export default function UserProfileScreen() {
                     <Text
                       style={[
                         styles.radioBtnText,
-                        newPetSpecies === sp && styles.radioBtnTextActive,
+                        newPetSpecies === sp && {
+                          color: colors.primary,
+                          fontWeight: '800',
+                        },
                       ]}
                     >
-                      {sp}
+                      {sp === 'Dog' ? '🐶 Dog' : '🐱 Cat'}
                     </Text>
                   </TouchableOpacity>
                 ))}
@@ -1148,17 +1643,23 @@ export default function UserProfileScreen() {
                     key={sx}
                     style={[
                       styles.radioBtn,
-                      newPetSex === sx && styles.radioBtnActive,
+                      newPetSex === sx && {
+                        borderColor: colors.primary,
+                        backgroundColor: colors.primaryMuted,
+                      },
                     ]}
                     onPress={() => setNewPetSex(sx)}
                   >
                     <Text
                       style={[
                         styles.radioBtnText,
-                        newPetSex === sx && styles.radioBtnTextActive,
+                        newPetSex === sx && {
+                          color: colors.primary,
+                          fontWeight: '800',
+                        },
                       ]}
                     >
-                      {sx}
+                      {sx === 'Male' ? '♂ Male' : '♀ Female'}
                     </Text>
                   </TouchableOpacity>
                 ))}
@@ -1168,9 +1669,11 @@ export default function UserProfileScreen() {
               <TextInput
                 style={styles.textInput}
                 placeholder="e.g. Bantay, Mingming"
-                placeholderTextColor="#94A3B8"
+                placeholderTextColor={colors.secondary}
+                maxLength={100}
                 value={newPetName}
                 onChangeText={setNewPetName}
+                returnKeyType="done"
               />
 
               <Text style={styles.fieldLabel}>Breed *</Text>
@@ -1203,10 +1706,14 @@ export default function UserProfileScreen() {
               <TextInput
                 style={styles.textInput}
                 placeholder="e.g. 2"
-                placeholderTextColor="#94A3B8"
+                placeholderTextColor={colors.secondary}
                 keyboardType="numeric"
+                maxLength={2}
                 value={newPetAge}
-                onChangeText={setNewPetAge}
+                onChangeText={(txt) =>
+                  setNewPetAge(txt.replace(/[^0-9]/g, ''))
+                }
+                returnKeyType="done"
               />
 
               <Text style={styles.fieldLabel}>Vital status</Text>
@@ -1228,6 +1735,7 @@ export default function UserProfileScreen() {
               </Text>
               <View style={styles.pickerBox}>
                 <Picker
+                  title="Select Sire / Parent 1 (Male)"
                   selectedValue={newPetParentId}
                   onValueChange={(v) => {
                     const val = String(v);
@@ -1262,6 +1770,7 @@ export default function UserProfileScreen() {
               </Text>
               <View style={styles.pickerBox}>
                 <Picker
+                  title="Select Dam / Parent 2 (Female)"
                   selectedValue={newPetParent2Id}
                   onValueChange={(v) => {
                     const val = String(v);
@@ -1305,24 +1814,54 @@ export default function UserProfileScreen() {
                 </Picker>
               </View>
 
-              <Text style={styles.fieldLabel}>Pet Description</Text>
+              <View style={styles.fieldLabelRow}>
+                <Text style={styles.fieldLabel}>Passport Headline / Title</Text>
+                <Text style={styles.charCounter}>{newPetTitle.length}/100</Text>
+              </View>
               <TextInput
                 style={styles.textInput}
                 placeholder="Friendly Aspin in Hinaplanon"
-                placeholderTextColor="#94A3B8"
+                placeholderTextColor={colors.secondary}
+                maxLength={100}
                 value={newPetTitle}
                 onChangeText={setNewPetTitle}
+                returnKeyType="done"
               />
 
-              <Text style={styles.fieldLabel}>
-                Lost & Found Instructions (Shown on Public QR)
-              </Text>
+              <View style={styles.fieldLabelRow}>
+                <Text style={styles.fieldLabel}>
+                  Pet Story / Bio (Optional)
+                </Text>
+                <Text style={styles.charCounter}>
+                  {newPetDescription.length}/1500
+                </Text>
+              </View>
+              <TextInput
+                style={[styles.textInput, styles.textAreaInput]}
+                placeholder="Personality, distinguishing marks, or care notes..."
+                placeholderTextColor={colors.secondary}
+                multiline
+                maxLength={1500}
+                value={newPetDescription}
+                onChangeText={setNewPetDescription}
+              />
+
+              <View style={styles.fieldLabelRow}>
+                <Text style={styles.fieldLabel}>
+                  Lost & Found Instructions (Shown on Public QR)
+                </Text>
+                <Text style={styles.charCounter}>
+                  {newPetLostFoundMsg.length}/500
+                </Text>
+              </View>
               <TextInput
                 style={styles.textInput}
                 placeholder="If found wandering, please call my owner immediately."
-                placeholderTextColor="#94A3B8"
+                placeholderTextColor={colors.secondary}
+                maxLength={500}
                 value={newPetLostFoundMsg}
                 onChangeText={setNewPetLostFoundMsg}
+                returnKeyType="done"
               />
 
               <Text style={styles.fieldLabel}>Pet Photo</Text>
@@ -1330,10 +1869,23 @@ export default function UserProfileScreen() {
                 style={styles.uploadBtn}
                 onPress={() => pickImageAsset(setPetImageAsset)}
               >
-                <Text style={styles.uploadBtnText}>
-                  {petImageAsset ? '✅ Photo Selected' : '📷 Select Pet Photo'}
+                <Text style={[styles.uploadBtnText, { color: colors.primary }]}>
+                  {petImageAsset
+                    ? '✅ Photo Selected (Tap to Change)'
+                    : '📷 Select Pet Photo'}
                 </Text>
               </TouchableOpacity>
+              {petImageAsset?.uri ? (
+                <View style={styles.previewRow}>
+                  <Image
+                    source={{ uri: petImageAsset.uri }}
+                    style={styles.selectedPreviewThumb}
+                  />
+                  <Text style={styles.previewCaption}>
+                    Pet photo ready to upload
+                  </Text>
+                </View>
+              ) : null}
 
               <Text style={styles.fieldLabel}>
                 Public QR Passport Privacy Consent
@@ -1343,6 +1895,8 @@ export default function UserProfileScreen() {
                 <Switch
                   value={shareOwnerName}
                   onValueChange={setShareOwnerName}
+                  trackColor={{ false: colors.border, true: colors.primary }}
+                  thumbColor="#FFFFFF"
                 />
               </View>
               <View style={styles.switchRow}>
@@ -1350,13 +1904,20 @@ export default function UserProfileScreen() {
                 <Switch
                   value={sharePublicPhoto}
                   onValueChange={setSharePublicPhoto}
+                  trackColor={{ false: colors.border, true: colors.primary }}
+                  thumbColor="#FFFFFF"
                 />
               </View>
               <View style={styles.switchRow}>
                 <Text style={styles.switchLabel}>
                   Share Emergency Contact on QR
                 </Text>
-                <Switch value={shareContact} onValueChange={setShareContact} />
+                <Switch
+                  value={shareContact}
+                  onValueChange={setShareContact}
+                  trackColor={{ false: colors.border, true: colors.primary }}
+                  thumbColor="#FFFFFF"
+                />
               </View>
               <View style={styles.switchRow}>
                 <Text style={styles.switchLabel}>
@@ -1365,26 +1926,42 @@ export default function UserProfileScreen() {
                 <Switch
                   value={sharePublicAddress}
                   onValueChange={setSharePublicAddress}
+                  trackColor={{ false: colors.border, true: colors.primary }}
+                  thumbColor="#FFFFFF"
                 />
               </View>
 
               <View style={styles.modalActionRow}>
                 <TouchableOpacity
-                  style={styles.cancelBtn}
-                  onPress={() => setIsAddPetVisible(false)}
+                  style={[
+                    styles.cancelBtn,
+                    isSubmittingPet && styles.disabledBtn,
+                  ]}
+                  onPress={closeAddPetModal}
                   disabled={isSubmittingPet}
                 >
                   <Text style={styles.cancelBtnText}>Cancel</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
-                  style={styles.submitBtn}
+                  style={[
+                    styles.submitBtn,
+                    { backgroundColor: colors.primary },
+                    (isSubmittingPet || isAddPetInvalid) && styles.disabledBtn,
+                  ]}
                   onPress={handleCreateInventoryPet}
-                  disabled={isSubmittingPet}
+                  disabled={isSubmittingPet || isAddPetInvalid}
                 >
                   {isSubmittingPet ? (
-                    <ActivityIndicator color="#FFFFFF" />
+                    <ActivityIndicator color={semanticColors.onPrimary} />
                   ) : (
-                    <Text style={styles.submitBtnText}>Save Pet & QR</Text>
+                    <Text
+                      style={[
+                        styles.submitBtnText,
+                        { color: semanticColors.onPrimary },
+                      ]}
+                    >
+                      Save Pet & QR
+                    </Text>
                   )}
                 </TouchableOpacity>
               </View>
@@ -1393,91 +1970,7 @@ export default function UserProfileScreen() {
         </KeyboardAvoidingView>
       </Modal>
 
-      {/* Modal 2: Edit Profile & Privacy */}
-      <Modal
-        visible={isEditProfileVisible}
-        animationType="slide"
-        transparent
-        onRequestClose={() => setIsEditProfileVisible(false)}
-      >
-        <KeyboardAvoidingView
-          style={styles.modalOverlay}
-          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        >
-          <View style={styles.modalCard}>
-            <ScrollView
-              keyboardShouldPersistTaps="handled"
-              showsVerticalScrollIndicator={false}
-              contentContainerStyle={{ paddingBottom: 60 }}
-            >
-              <Text style={styles.modalTitle}>Edit Profile & Privacy</Text>
-              <Text style={styles.fieldLabel}>Full Name</Text>
-              <TextInput
-                style={styles.textInput}
-                value={editFullName}
-                onChangeText={setEditFullName}
-              />
-              <Text style={styles.fieldLabel}>Phone Number</Text>
-              <TextInput
-                style={styles.textInput}
-                value={editPhone}
-                onChangeText={setEditPhone}
-                keyboardType="phone-pad"
-              />
-              <Text style={styles.fieldLabel}>Barangay (Iligan City)</Text>
-              <View style={styles.pickerBox}>
-                <Picker
-                  selectedValue={editBarangay}
-                  onValueChange={(v) => setEditBarangay(v as IliganBarangay)}
-                  style={{ color: colors.text, width: '100%' }}
-                  dropdownIconColor={colors.text}
-                >
-                  {ILIGAN_BARANGAYS.map((b) => (
-                    <Picker.Item key={b} label={b} value={b} />
-                  ))}
-                </Picker>
-              </View>
-              <Text style={styles.fieldLabel}>Home Address</Text>
-              <TextInput
-                style={styles.textInput}
-                value={editAddress}
-                onChangeText={setEditAddress}
-              />
-              <View style={[styles.switchRow, { marginTop: 12 }]}>
-                <Text style={styles.switchLabel}>
-                  Show My Avatar on My Adoption Listings
-                </Text>
-                <Switch
-                  value={shareAvatarOnListings}
-                  onValueChange={setShareAvatarOnListings}
-                />
-              </View>
-
-              <View style={styles.modalActionRow}>
-                <TouchableOpacity
-                  style={styles.cancelBtn}
-                  onPress={() => setIsEditProfileVisible(false)}
-                >
-                  <Text style={styles.cancelBtnText}>Cancel</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={styles.submitBtn}
-                  onPress={handleSaveProfileChanges}
-                  disabled={isSavingProfile}
-                >
-                  {isSavingProfile ? (
-                    <ActivityIndicator color="#FFFFFF" />
-                  ) : (
-                    <Text style={styles.submitBtnText}>Save Changes</Text>
-                  )}
-                </TouchableOpacity>
-              </View>
-            </ScrollView>
-          </View>
-        </KeyboardAvoidingView>
-      </Modal>
-
-      {/* Modal 3: Scannable Collar QR Modal */}
+      {/* Modal 2: Scannable Collar QR Modal */}
       <Modal
         visible={!!selectedPetForQR}
         animationType="fade"
@@ -1486,23 +1979,64 @@ export default function UserProfileScreen() {
       >
         <View style={styles.modalBackdrop}>
           <View style={styles.qrCardModal}>
-            <Text style={styles.qrTitle}>CityVetHub Digital Pet Passport</Text>
-            <Text style={styles.qrSubtitle}>
-              {selectedPetForQR?.verificationStatus === 'verified'
-                ? `✓ CVO Verified (${selectedPetForQR.officialRegistryId})`
-                : 'Pending Verification • Personal QR Passport'}
-            </Text>
+            <View style={styles.modalHeaderRow}>
+              <View style={{ flex: 1, alignItems: 'center' }}>
+                <Text style={styles.qrTitle}>CityVetHub Digital Pet Passport</Text>
+                <Text
+                  style={[
+                    styles.qrSubtitle,
+                    {
+                      color:
+                        selectedPetForQR?.verificationStatus === 'verified'
+                          ? semanticColors.successText
+                          : semanticColors.warningText,
+                    },
+                  ]}
+                >
+                  {selectedPetForQR?.verificationStatus === 'verified'
+                    ? `✓ CVO Verified (${selectedPetForQR.officialRegistryId})`
+                    : selectedPetForQR?.verificationStatus === 'pending'
+                    ? '⏳ Pending CVO Verification • Personal QR'
+                    : 'Personal Inventory QR Passport'}
+                </Text>
+              </View>
+            </View>
 
             {selectedPetForQR && (
               <>
-                <Image
-                  source={{
-                    uri: `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(
-                      getPetPassportQrUrl(selectedPetForQR.petProfileId)
-                    )}`,
-                  }}
-                  style={{ width: 190, height: 190, marginVertical: 12 }}
-                />
+                <View
+                  style={[
+                    styles.qrWhiteCanvas,
+                    {
+                      backgroundColor: qrModalImageError
+                        ? colors.surfaceMuted
+                        : '#FFFFFF',
+                      borderColor: colors.border,
+                    },
+                  ]}
+                >
+                  {!qrModalImageError ? (
+                    <Image
+                      source={{
+                        uri: `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(
+                          getPetPassportQrUrl(selectedPetForQR.petProfileId)
+                        )}`,
+                      }}
+                      style={{ width: 184, height: 184 }}
+                      onError={() => setQrModalImageError(true)}
+                    />
+                  ) : (
+                    <View style={styles.qrOfflineBox}>
+                      <Text style={{ fontSize: 28 }}>📱</Text>
+                      <Text
+                        style={[styles.qrOfflineText, { color: colors.secondary }]}
+                      >
+                        QR preview unavailable offline. Share link or read ID
+                        below.
+                      </Text>
+                    </View>
+                  )}
+                </View>
 
                 <Text style={styles.qrPetName}>{selectedPetForQR.name}</Text>
                 <Text style={styles.qrPetBreed}>
@@ -1510,7 +2044,7 @@ export default function UserProfileScreen() {
                 </Text>
 
                 <View style={styles.qrDetailsBox}>
-                  <Text style={styles.qrDetailText}>
+                  <Text style={styles.qrDetailText} selectable>
                     <Text style={styles.bold}>Passport URL: </Text>
                     {getPetPassportQrUrl(selectedPetForQR.petProfileId)}
                   </Text>
@@ -1519,15 +2053,43 @@ export default function UserProfileScreen() {
                     {selectedPetForQR.barangay}
                   </Text>
                 </View>
+
+                <View style={styles.qrModalActions}>
+                  <TouchableOpacity
+                    style={[
+                      styles.shareQrBtn,
+                      { backgroundColor: colors.primary },
+                    ]}
+                    onPress={() => handleShareQuickQr(selectedPetForQR)}
+                  >
+                    <Text
+                      style={[
+                        styles.shareQrText,
+                        { color: semanticColors.onPrimary },
+                      ]}
+                    >
+                      📤 Share Link
+                    </Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[
+                      styles.closeQrBtn,
+                      {
+                        backgroundColor: colors.surfaceMuted,
+                        borderColor: colors.border,
+                      },
+                    ]}
+                    onPress={() => setSelectedPetForQR(null)}
+                  >
+                    <Text
+                      style={[styles.closeQrText, { color: colors.text }]}
+                    >
+                      Close
+                    </Text>
+                  </TouchableOpacity>
+                </View>
               </>
             )}
-
-            <TouchableOpacity
-              style={styles.closeQrBtn}
-              onPress={() => setSelectedPetForQR(null)}
-            >
-              <Text style={styles.closeQrText}>Close QR Card</Text>
-            </TouchableOpacity>
           </View>
         </View>
       </Modal>
@@ -1539,208 +2101,359 @@ const baseStyles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#F8FAFC' },
   userHeaderCard: {
     backgroundColor: '#FFFFFF',
-    padding: 14,
+    padding: 16,
     flexDirection: 'row',
     alignItems: 'center',
     borderBottomWidth: 1,
     borderColor: '#E2E8F0',
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.04,
+    shadowRadius: 6,
+    elevation: 2,
   },
-  userAvatarWrap: { position: 'relative', marginRight: 12 },
+  userAvatarWrap: { position: 'relative', marginRight: 14 },
   userAvatar: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: '#00AEEF',
+    width: 68,
+    height: 68,
+    borderRadius: 34,
+    backgroundColor: '#3478F6',
     justifyContent: 'center',
     alignItems: 'center',
   },
-  userAvatarImg: { width: 48, height: 48, borderRadius: 24 },
-  avatarText: { color: '#FFFFFF', fontSize: 18, fontWeight: 'bold' },
-  greenCheckBadge: {
+  userAvatarImg: { width: 68, height: 68, borderRadius: 34 },
+  avatarText: { color: '#FFFFFF', fontSize: 26, fontWeight: '900' },
+  avatarLoadingOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    borderRadius: 34,
+    backgroundColor: 'rgba(0,0,0,0.4)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  cameraBadge: {
     position: 'absolute',
     bottom: -2,
     right: -2,
-    backgroundColor: '#16A34A',
-    width: 18,
-    height: 18,
-    borderRadius: 9,
+    backgroundColor: '#3478F6',
+    width: 24,
+    height: 24,
+    borderRadius: 12,
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 2,
     borderColor: '#FFFFFF',
   },
-  greenCheckText: { color: '#FFFFFF', fontSize: 10, fontWeight: 'bold' },
-  userInfo: { flex: 1 },
+  greenCheckBadge: {
+    position: 'absolute',
+    top: -2,
+    right: -2,
+    backgroundColor: '#16A34A',
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 2,
+    borderColor: '#FFFFFF',
+  },
+  greenCheckText: { color: '#FFFFFF', fontSize: 11, fontWeight: '900' },
+  userInfo: { flex: 1, minWidth: 0 },
   nameRow: {
     flexDirection: 'row',
     alignItems: 'center',
     flexWrap: 'wrap',
     gap: 6,
   },
-  userName: { fontSize: 15, fontWeight: 'bold', color: '#1E293B' },
-  verifPill: { paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 },
-  verifPillGreen: { backgroundColor: '#DCFCE7' },
-  verifPillAmber: { backgroundColor: '#FEF3C7' },
-  verifPillGray: { backgroundColor: '#F1F5F9' },
-  verifPillText: { fontSize: 9, fontWeight: 'bold' },
-  userLocation: { fontSize: 12, color: '#64748B', marginTop: 1 },
-  userContact: { fontSize: 11, color: '#94A3B8', marginTop: 1 },
+  userName: { fontSize: 17, fontWeight: '800', color: '#1E293B' },
+  verifPill: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+    borderWidth: 1,
+  },
+  verifPillText: { fontSize: 10, fontWeight: '800' },
+  userLocation: {
+    fontSize: 12,
+    color: '#64748B',
+    marginTop: 3,
+    fontWeight: '500',
+  },
+  userContact: { fontSize: 11, color: '#94A3B8', marginTop: 2 },
   headerMiniActions: {
     flexDirection: 'row',
-    gap: 8,
-    marginTop: 4,
+    marginTop: 8,
     alignItems: 'center',
   },
-  editProfileLink: { fontSize: 11, color: '#0284C7', fontWeight: '700' },
+  editProfileBtn: {
+    backgroundColor: '#EFF6FF',
+    borderColor: '#BFDBFE',
+    borderWidth: 1,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    minHeight: 36,
+    justifyContent: 'center',
+    borderRadius: 8,
+  },
+  editProfileLink: { fontSize: 12, color: '#3478F6', fontWeight: '800' },
   tabHeader: {
     flexDirection: 'row',
     backgroundColor: '#FFFFFF',
     borderBottomWidth: 1,
     borderColor: '#E2E8F0',
-    padding: 8,
-    gap: 6,
+    padding: 10,
+    gap: 8,
   },
   segmentBtn: {
     flex: 1,
-    paddingVertical: 9,
-    borderRadius: 8,
+    paddingVertical: 10,
+    borderRadius: 10,
     alignItems: 'center',
     backgroundColor: '#F1F5F9',
   },
-  segmentBtnActive: { backgroundColor: '#00AEEF' },
   segmentText: { fontSize: 12, fontWeight: '700', color: '#64748B' },
-  segmentTextActive: { color: '#FFFFFF' },
   scrollContent: { padding: 16, paddingBottom: 120 },
+  errorBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+    padding: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    marginBottom: 14,
+  },
+  errorBannerText: {
+    flex: 1,
+    fontSize: 12,
+    fontWeight: '600',
+    lineHeight: 17,
+  },
+  retryBtn: {
+    borderWidth: 1,
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    minHeight: 34,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  retryBtnText: { fontSize: 12, fontWeight: '700' },
   sectionHeader: {
     fontSize: 15,
-    fontWeight: 'bold',
+    fontWeight: '800',
     color: '#1E293B',
-    marginBottom: 10,
+    marginBottom: 12,
   },
   addPetBtn: {
-    backgroundColor: '#F0FDF4',
-    borderWidth: 1,
-    borderColor: '#22C55E',
-    paddingVertical: 12,
-    borderRadius: 10,
+    backgroundColor: '#DCFCE7',
+    borderWidth: 1.5,
+    borderColor: '#BBF7D0',
+    paddingVertical: 13,
+    borderRadius: 12,
     alignItems: 'center',
     marginBottom: 16,
     borderStyle: 'dashed',
   },
-  addPetBtnText: { color: '#15803D', fontSize: 13, fontWeight: 'bold' },
+  addPetBtnText: { color: '#166534', fontSize: 13, fontWeight: '800' },
   emptyCard: {
     backgroundColor: '#FFFFFF',
-    borderRadius: 12,
-    padding: 20,
+    borderRadius: 16,
+    padding: 24,
     alignItems: 'center',
     borderWidth: 1,
     borderColor: '#E2E8F0',
+    marginVertical: 8,
   },
+  emptyIcon: { fontSize: 36, marginBottom: 8 },
   emptyTitle: {
-    fontSize: 15,
-    fontWeight: 'bold',
-    color: '#334155',
-    marginBottom: 4,
+    fontSize: 16,
+    fontWeight: '800',
+    color: '#1E293B',
+    marginBottom: 6,
+    textAlign: 'center',
   },
   emptySubtitle: {
-    fontSize: 12,
+    fontSize: 13,
     color: '#64748B',
     textAlign: 'center',
-    lineHeight: 18,
+    lineHeight: 19,
+    paddingHorizontal: 12,
   },
+  emptyActionBtn: {
+    marginTop: 14,
+    backgroundColor: '#3478F6',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 10,
+  },
+  emptyActionBtnText: { color: '#FFFFFF', fontSize: 13, fontWeight: '800' },
   petCard: {
     backgroundColor: '#FFFFFF',
-    borderRadius: 12,
+    borderRadius: 16,
     padding: 16,
     marginBottom: 14,
     borderWidth: 1,
     borderColor: '#E2E8F0',
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 8,
+    elevation: 2,
   },
   cardHeaderRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'flex-start',
+    gap: 10,
   },
-  petThumb: { width: 52, height: 52, borderRadius: 10 },
+  cardIdentityRow: {
+    flexDirection: 'row',
+    gap: 12,
+    flex: 1,
+    minWidth: 0,
+  },
+  cardTextCol: { flex: 1, minWidth: 0 },
+  petThumb: { width: 64, height: 64, borderRadius: 12 },
   petThumbPlaceholder: {
-    width: 52,
-    height: 52,
-    borderRadius: 10,
+    width: 64,
+    height: 64,
+    borderRadius: 12,
     backgroundColor: '#F1F5F9',
     alignItems: 'center',
     justifyContent: 'center',
   },
-  petName: { fontSize: 17, fontWeight: 'bold', color: '#1E293B' },
-  petSubtitle: { fontSize: 12, color: '#64748B', marginTop: 2 },
-  petBrgyText: { fontSize: 11, color: '#0284C7', marginTop: 2 },
-  statusBadge: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6 },
-  badgeRegistered: { backgroundColor: '#DCFCE7' },
-  badgePending: { backgroundColor: '#FEF3C7' },
-  badgeDraft: { backgroundColor: '#E2E8F0' },
-  badgeText: { fontSize: 10, fontWeight: '700' },
-  badgeTextReg: { color: '#166534' },
-  badgeTextPending: { color: '#B45309' },
-  badgeTextDraft: { color: '#475569' },
-  divider: { height: 1, backgroundColor: '#F1F5F9', marginVertical: 10 },
+  petName: { fontSize: 18, fontWeight: '800', color: '#1E293B' },
+  petSubtitle: {
+    fontSize: 12,
+    color: '#64748B',
+    marginTop: 2,
+    fontWeight: '500',
+  },
+  petBrgyText: {
+    fontSize: 12,
+    color: '#3478F6',
+    marginTop: 3,
+    fontWeight: '600',
+  },
+  statusBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+    borderWidth: 1,
+    flexShrink: 0,
+  },
+  badgeText: { fontSize: 10, fontWeight: '800' },
+  metaCard: {
+    backgroundColor: '#F8FAFC',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    padding: 10,
+    marginVertical: 10,
+  },
   infoRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    marginBottom: 6,
+    alignItems: 'center',
+    marginBottom: 4,
   },
-  infoLabel: { fontSize: 12, color: '#64748B', fontWeight: '600' },
-  infoValue: { fontSize: 12, color: '#1E293B', fontWeight: '700' },
-  cardActions: { flexDirection: 'row', gap: 8, marginTop: 12 },
+  infoLabel: {
+    fontSize: 12,
+    color: '#64748B',
+    fontWeight: '600',
+    flexShrink: 0,
+  },
+  infoValue: {
+    fontSize: 12,
+    color: '#1E293B',
+    fontWeight: '700',
+    flex: 1,
+    textAlign: 'right',
+    marginLeft: 12,
+  },
+  contactRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+    marginVertical: 4,
+  },
+  contactTextFlex: { flex: 1, minWidth: 0 },
+  cardActions: { flexDirection: 'row', gap: 10, marginTop: 4 },
   qrBtn: {
     flex: 1,
-    backgroundColor: '#00AEEF',
-    paddingVertical: 10,
-    borderRadius: 8,
+    backgroundColor: '#3478F6',
+    paddingVertical: 11,
+    borderRadius: 12,
     alignItems: 'center',
+    minHeight: 44,
+    justifyContent: 'center',
   },
-  qrBtnText: { color: '#FFFFFF', fontSize: 12, fontWeight: 'bold' },
+  qrBtnText: { color: '#FFFFFF', fontSize: 12, fontWeight: '800' },
   manageBtn: {
     flex: 1,
     borderWidth: 1,
-    borderColor: '#0284C7',
-    paddingVertical: 10,
-    borderRadius: 8,
+    borderColor: '#3478F6',
+    paddingVertical: 11,
+    borderRadius: 12,
     alignItems: 'center',
+    minHeight: 44,
+    justifyContent: 'center',
   },
-  manageBtnText: { color: '#0284C7', fontSize: 12, fontWeight: 'bold' },
+  manageBtnText: { color: '#3478F6', fontSize: 12, fontWeight: '800' },
   appCard: {
     backgroundColor: '#FFFFFF',
-    borderRadius: 12,
-    padding: 14,
+    borderRadius: 16,
+    padding: 16,
     borderWidth: 1,
     borderColor: '#E2E8F0',
     marginBottom: 12,
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 8,
+    elevation: 2,
   },
-  appHeader: {
+  appStatusRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    marginBottom: 6,
+    alignItems: 'center',
+    marginBottom: 8,
   },
-  appName: { fontSize: 14, fontWeight: 'bold', color: '#1E293B' },
-  appControl: { fontSize: 11, fontWeight: 'bold', color: '#00AEEF' },
+  appDateText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#64748B',
+  },
+  applicantNameTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: '#0F172A',
+    marginBottom: 10,
+    letterSpacing: -0.3,
+  },
   noticeBox: {
-    backgroundColor: '#F0F9FF',
+    backgroundColor: '#EFF6FF',
     borderLeftWidth: 3,
-    borderLeftColor: '#00AEEF',
-    padding: 10,
-    borderRadius: 4,
-    marginVertical: 8,
-  },
-  noticeTitle: { fontSize: 12, fontWeight: 'bold', color: '#0369A1' },
-  noticeText: { fontSize: 12, color: '#334155', lineHeight: 17 },
-  verifExplainerBanner: {
-    backgroundColor: '#F0FDF4',
-    borderLeftWidth: 3,
-    borderLeftColor: '#16A34A',
+    borderLeftColor: '#3478F6',
     padding: 10,
     borderRadius: 6,
-    marginBottom: 12,
+    marginVertical: 8,
   },
-  verifExplainerText: { fontSize: 12, color: '#166534', lineHeight: 17 },
+  noticeTitle: { fontSize: 12, fontWeight: '800', color: '#3478F6' },
+  noticeText: { fontSize: 13, color: '#334155', lineHeight: 18 },
+  verifExplainerBanner: {
+    backgroundColor: '#DCFCE7',
+    borderLeftWidth: 3,
+    borderLeftColor: '#16A34A',
+    padding: 12,
+    borderRadius: 8,
+    marginBottom: 14,
+  },
+  verifExplainerText: { fontSize: 12, color: '#166534', lineHeight: 18 },
   modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.55)',
@@ -1748,18 +2461,40 @@ const baseStyles = StyleSheet.create({
   },
   modalCard: {
     backgroundColor: '#FFFFFF',
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
     padding: 20,
     maxHeight: '90%',
   },
+  modalDragHandle: {
+    width: 40,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: '#CBD5E1',
+    alignSelf: 'center',
+    marginBottom: 12,
+  },
+  modalHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 12,
+  },
   modalTitle: {
     fontSize: 18,
-    fontWeight: 'bold',
+    fontWeight: '800',
     color: '#1E293B',
-    marginBottom: 4,
   },
-  modalSubtitle: { fontSize: 12, color: '#64748B', marginBottom: 12 },
+  modalSubtitle: { fontSize: 12, color: '#64748B', marginTop: 2 },
+  modalCloseBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#F1F5F9',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  modalCloseText: { fontSize: 15, color: '#64748B', fontWeight: '800' },
   fieldLabel: {
     fontSize: 12,
     fontWeight: '700',
@@ -1767,55 +2502,89 @@ const baseStyles = StyleSheet.create({
     marginTop: 10,
     marginBottom: 6,
   },
+  fieldLabelRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  charCounter: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#94A3B8',
+    marginTop: 10,
+  },
   textInput: {
     backgroundColor: '#F8FAFC',
     borderWidth: 1,
     borderColor: '#CBD5E1',
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    height: 48,
     fontSize: 14,
     color: '#1E293B',
+  },
+  textAreaInput: {
+    height: 88,
+    paddingTop: 12,
+    textAlignVertical: 'top',
   },
   pickerBox: {
     backgroundColor: '#F8FAFC',
     borderWidth: 1,
     borderColor: '#CBD5E1',
-    borderRadius: 8,
-    height: 50,
+    borderRadius: 12,
+    minHeight: 52,
     justifyContent: 'center',
+    marginBottom: 4,
   },
-  radioRow: { flexDirection: 'row', gap: 8 },
+  radioRow: { flexDirection: 'row', gap: 10 },
   radioBtn: {
     flex: 1,
-    paddingVertical: 10,
+    paddingVertical: 11,
     borderWidth: 1,
     borderColor: '#E2E8F0',
-    borderRadius: 8,
+    borderRadius: 12,
     alignItems: 'center',
     backgroundColor: '#F8FAFC',
   },
-  radioBtnActive: { borderColor: '#00AEEF', backgroundColor: '#E0F2FE' },
-  radioBtnText: { fontSize: 12, fontWeight: '600', color: '#64748B' },
-  radioBtnTextActive: { color: '#00AEEF', fontWeight: 'bold' },
+  radioBtnText: { fontSize: 13, fontWeight: '600', color: '#64748B' },
   switchRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingVertical: 4,
+    paddingVertical: 6,
   },
-  switchLabel: { fontSize: 12, color: '#334155', flex: 1 },
+  switchLabel: { fontSize: 13, color: '#334155', flex: 1, fontWeight: '500' },
   uploadBtn: {
     backgroundColor: '#F8FAFC',
-    borderWidth: 1,
+    borderWidth: 1.5,
     borderColor: '#CBD5E1',
     borderStyle: 'dashed',
-    paddingVertical: 12,
-    borderRadius: 8,
+    paddingVertical: 13,
+    borderRadius: 12,
     alignItems: 'center',
     marginVertical: 8,
   },
-  uploadBtnText: { color: '#0284C7', fontSize: 13, fontWeight: '600' },
+  uploadBtnText: { color: '#3478F6', fontSize: 13, fontWeight: '700' },
+  previewRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 10,
+    paddingHorizontal: 4,
+  },
+  selectedPreviewThumb: {
+    width: 48,
+    height: 48,
+    borderRadius: 8,
+    backgroundColor: '#E2E8F0',
+  },
+  previewCaption: {
+    flex: 1,
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#64748B',
+  },
   modalActionRow: {
     flexDirection: 'row',
     gap: 10,
@@ -1825,21 +2594,25 @@ const baseStyles = StyleSheet.create({
   cancelBtn: {
     flex: 1,
     paddingVertical: 12,
-    borderRadius: 8,
+    borderRadius: 12,
     borderWidth: 1,
     borderColor: '#CBD5E1',
     alignItems: 'center',
+    minHeight: 46,
+    justifyContent: 'center',
   },
-  cancelBtnText: { color: '#64748B', fontSize: 14, fontWeight: '600' },
+  cancelBtnText: { color: '#64748B', fontSize: 14, fontWeight: '700' },
   submitBtn: {
     flex: 1.5,
-    backgroundColor: '#00AEEF',
+    backgroundColor: '#3478F6',
     paddingVertical: 12,
-    borderRadius: 8,
+    borderRadius: 12,
     alignItems: 'center',
-    marginTop: 6,
+    minHeight: 46,
+    justifyContent: 'center',
   },
-  submitBtnText: { color: '#FFFFFF', fontSize: 14, fontWeight: 'bold' },
+  submitBtnText: { color: '#FFFFFF', fontSize: 14, fontWeight: '800' },
+  disabledBtn: { opacity: 0.45 },
   modalBackdrop: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.6)',
@@ -1850,29 +2623,87 @@ const baseStyles = StyleSheet.create({
   qrCardModal: {
     width: '100%',
     backgroundColor: '#FFFFFF',
-    borderRadius: 16,
+    borderRadius: 20,
     padding: 20,
     alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
   },
-  qrTitle: { fontSize: 16, fontWeight: 'bold', color: '#1E293B' },
-  qrSubtitle: { fontSize: 11, color: '#16A34A', fontWeight: '700' },
-  qrPetName: { fontSize: 20, fontWeight: 'bold', color: '#1E293B' },
+  qrTitle: {
+    fontSize: 17,
+    fontWeight: '800',
+    color: '#1E293B',
+    textAlign: 'center',
+  },
+  qrSubtitle: {
+    fontSize: 12,
+    color: '#16A34A',
+    fontWeight: '700',
+    textAlign: 'center',
+    marginTop: 2,
+  },
+  qrWhiteCanvas: {
+    backgroundColor: '#FFFFFF',
+    padding: 12,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    marginVertical: 12,
+  },
+  qrOfflineBox: {
+    width: 184,
+    height: 184,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 14,
+    gap: 8,
+  },
+  qrOfflineText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#475569',
+    textAlign: 'center',
+    lineHeight: 16,
+  },
+  qrPetName: {
+    fontSize: 22,
+    fontWeight: '800',
+    color: '#1E293B',
+    marginTop: 2,
+  },
   qrPetBreed: { fontSize: 13, color: '#64748B', marginBottom: 12 },
   qrDetailsBox: {
     width: '100%',
     backgroundColor: '#F8FAFC',
-    borderRadius: 8,
+    borderRadius: 10,
     padding: 12,
     marginBottom: 16,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
   },
   qrDetailText: { fontSize: 11, color: '#334155', marginBottom: 4 },
-  bold: { fontWeight: 'bold' },
-  closeQrBtn: {
-    backgroundColor: '#1E293B',
-    paddingVertical: 12,
-    borderRadius: 8,
+  bold: { fontWeight: '800' },
+  qrModalActions: {
+    flexDirection: 'row',
+    gap: 10,
     width: '100%',
-    alignItems: 'center',
   },
-  closeQrText: { color: '#FFFFFF', fontWeight: 'bold', fontSize: 13 },
+  shareQrBtn: {
+    flex: 1.3,
+    backgroundColor: '#3478F6',
+    paddingVertical: 13,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  shareQrText: { color: '#FFFFFF', fontWeight: '800', fontSize: 14 },
+  closeQrBtn: {
+    flex: 1,
+    borderWidth: 1,
+    paddingVertical: 13,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  closeQrText: { fontWeight: '800', fontSize: 14 },
 });

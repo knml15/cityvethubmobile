@@ -56,33 +56,122 @@ export default function AppNavigator() {
             | undefined;
           if (!data) return;
 
-          if (data.type === 'adoption_match' && data.listingId) {
-            const targetListingId = String(data.listingId);
-            let matched = useAdoptionStore
-              .getState()
-              .availablePets.find(
-                (item) => String(item.listingId || item.id) === targetListingId
-              );
+          const notifType = String(data.type || data.kind || '')
+            .trim()
+            .toLowerCase();
 
-            if (!matched) {
-              await useAdoptionStore.getState().fetchAvailablePets();
-              matched = useAdoptionStore
+          if (notifType === 'adoption_match') {
+            if (data.listingId) {
+              const targetListingId = String(data.listingId);
+              let matched = useAdoptionStore
                 .getState()
                 .availablePets.find(
                   (item) =>
                     String(item.listingId || item.id) === targetListingId
                 );
-            }
 
-            if (navigationRef.isReady()) {
-              const detailPayload = matched
-                ? buildPetDetailPayload(matched, user?.id)
-                : null;
-              if (detailPayload) {
-                navigationRef.navigate('PetDetail', detailPayload);
-              } else if (!isOfficer) {
-                navigationRef.navigate('MainApp');
+              if (!matched) {
+                await useAdoptionStore.getState().fetchAvailablePets();
+                matched = useAdoptionStore
+                  .getState()
+                  .availablePets.find(
+                    (item) =>
+                      String(item.listingId || item.id) === targetListingId
+                  );
               }
+
+              if (navigationRef.isReady()) {
+                const detailPayload = matched
+                  ? buildPetDetailPayload(matched, user?.id)
+                  : null;
+                if (detailPayload) {
+                  navigationRef.navigate('PetDetail', detailPayload);
+                } else if (!isOfficer) {
+                  navigationRef.navigate('MainApp');
+                }
+              }
+            } else if (navigationRef.isReady() && !isOfficer) {
+              navigationRef.navigate('MainApp');
+            }
+            return;
+          }
+
+          if (!navigationRef.isReady()) return;
+
+          if (notifType === 'incident_report') {
+            if (isOfficer) {
+              navigationRef.navigate('OfficerApp', {
+                screen: 'FieldIncidents',
+              });
+            }
+            return;
+          }
+
+          if (
+            notifType === 'alert' ||
+            notifType === 'outbreak' ||
+            notifType === 'advisory'
+          ) {
+            if (isOfficer) {
+              navigationRef.navigate('OfficerApp', { screen: 'OcularQueue' });
+            } else {
+              navigationRef.navigate('MainApp', {
+                screen: 'Community',
+                params: { tab: 'notices' },
+              });
+            }
+            return;
+          }
+
+          if (
+            notifType === 'community' ||
+            notifType === 'post_comment' ||
+            notifType === 'comment_reply' ||
+            notifType === 'like_post' ||
+            notifType === 'like_comment' ||
+            notifType === 'join_request' ||
+            notifType === 'join_status' ||
+            notifType === 'announcement' ||
+            notifType === 'channel_deleted' ||
+            notifType === 'post_deleted'
+          ) {
+            const communityParams = {
+              channelId: data.channelId ? String(data.channelId) : undefined,
+              postId: data.postId ? String(data.postId) : undefined,
+              tab: (notifType === 'channel_deleted'
+                ? 'channels'
+                : notifType === 'post_deleted'
+                ? 'feed'
+                : data.tab ||
+                  (data.channelId || data.postId ? 'feed' : 'notices')) as
+                | 'feed'
+                | 'channels'
+                | 'notices',
+            };
+            if (isOfficer) {
+              navigationRef.navigate('OfficerApp', {
+                screen: 'Community',
+                params: communityParams,
+              });
+            } else {
+              navigationRef.navigate('MainApp', {
+                screen: 'Community',
+                params: communityParams,
+              });
+            }
+            return;
+          }
+
+          if (
+            notifType === 'application' ||
+            notifType === 'verification' ||
+            notifType === 'medical' ||
+            notifType === 'ownership'
+          ) {
+            if (isOfficer) {
+              navigationRef.navigate('OfficerApp', { screen: 'FieldLookup' });
+            } else {
+              navigationRef.navigate('MainApp', { screen: 'UserProfile' });
             }
           }
         }
@@ -100,6 +189,14 @@ export default function AppNavigator() {
     };
   }, [isAuthenticated, user?.id, isOfficer]);
 
+  const themedHeaderOptions = {
+    headerShown: true,
+    headerStyle: { backgroundColor: colors.surface },
+    headerTintColor: colors.text,
+    headerTitleStyle: { color: colors.text, fontWeight: '700' as const },
+    headerBackTitle: 'Back',
+  };
+
   return (
     <NavigationContainer ref={navigationRef} theme={navTheme}>
       <Stack.Navigator screenOptions={{ headerShown: false }}>
@@ -116,10 +213,8 @@ export default function AppNavigator() {
               name="PetDetail"
               component={PetDetailScreen}
               options={{
-                headerShown: true,
+                ...themedHeaderOptions,
                 title: 'Listing Details (Read-Only)',
-                headerTintColor: '#1E293B',
-                headerBackTitle: 'Back',
               }}
             />
           </Stack.Group>
@@ -131,20 +226,16 @@ export default function AppNavigator() {
               name="PetDetail"
               component={PetDetailScreen}
               options={{
-                headerShown: true,
+                ...themedHeaderOptions,
                 title: 'Adoption Listing',
-                headerTintColor: '#1E293B',
-                headerBackTitle: 'Back',
               }}
             />
             <Stack.Screen
               name="OwnedPetPassport"
               component={OwnedPetPassportScreen}
               options={{
-                headerShown: true,
+                ...themedHeaderOptions,
                 title: 'My Pet & QR Passport',
-                headerTintColor: '#1E293B',
-                headerBackTitle: 'Back',
               }}
             />
           </Stack.Group>

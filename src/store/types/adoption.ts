@@ -46,9 +46,9 @@ export interface AdoptionState {
   myApplications: AdoptionApplication[];
   incomingApplications: AdoptionApplication[];
   isLoading: boolean;
-  fetchAvailablePets: () => Promise<void>;
-  fetchMyApplications: () => Promise<void>;
-  fetchIncomingApplications: () => Promise<void>;
+  fetchAvailablePets: (silent?: boolean) => Promise<void>;
+  fetchMyApplications: (silent?: boolean) => Promise<void>;
+  fetchIncomingApplications: (silent?: boolean) => Promise<void>;
   submitApplication: (data: Partial<AdoptionApplication>) => Promise<void>;
   listOwnPet: (payload: {
     petProfileId: string;

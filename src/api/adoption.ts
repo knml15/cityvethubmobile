@@ -223,23 +223,75 @@ export const adoptionApi = {
       ]
     );
 
-    return res.documents.map((doc: any) => ({
-      id: doc.$id,
-      listingId: doc.listingId,
-      pet: doc.petId || doc.listingId,
-      applicant: doc.applicantId,
-      applicantId: doc.applicantId,
-      applicantName: doc.applicantName,
-      petName: doc.petNameSnapshot || doc.petName || '',
-      listingTitle: doc.listingTitleSnapshot || doc.listingTitle || '',
-      message: doc.message,
-      contact_number: doc.contactNumber || '',
-      contactNumber: doc.contactNumber || '',
-      address: 'Iligan City',
-      reason_for_adoption: doc.message || '',
-      has_other_pets: false,
-      status: String(doc.status || 'PENDING').toUpperCase() as any,
-      applied_at: doc.submittedAt || doc.$createdAt,
-    }));
+    const missingNameIds = res.documents
+      .filter(
+        (doc: any) =>
+          !doc.petNameSnapshot &&
+          !doc.petName &&
+          !doc.listingTitleSnapshot &&
+          !doc.listingTitle
+      )
+      .map((doc: any) => String(doc.$id));
+
+    const labelMap: Record<
+      string,
+      { petName?: string; listingTitle?: string }
+    > = {};
+
+    if (missingNameIds.length > 0) {
+      try {
+        const resolved = await operate<{
+          labels?: {
+            applicationId: string;
+            petName?: string;
+            listingTitle?: string;
+          }[];
+        }>('resolveAdoptionApplicationNames', {
+          applicationIds: missingNameIds,
+        });
+        for (const item of resolved?.labels || []) {
+          if (item?.applicationId) {
+            labelMap[String(item.applicationId)] = {
+              petName: item.petName,
+              listingTitle: item.listingTitle,
+            };
+          }
+        }
+      } catch {
+        // Fallback gracefully if label resolution fails
+      }
+    }
+
+    return res.documents.map((doc: any) => {
+      const resolvedLabel = labelMap[String(doc.$id)];
+      return {
+        id: doc.$id,
+        listingId: doc.listingId,
+        pet: doc.petId || doc.listingId,
+        applicant: doc.applicantId,
+        applicantId: doc.applicantId,
+        applicantName: doc.applicantName,
+        petName:
+          doc.petNameSnapshot ||
+          doc.petName ||
+          resolvedLabel?.petName ||
+          resolvedLabel?.listingTitle ||
+          '',
+        listingTitle:
+          doc.listingTitleSnapshot ||
+          doc.listingTitle ||
+          resolvedLabel?.listingTitle ||
+          resolvedLabel?.petName ||
+          '',
+        message: doc.message,
+        contact_number: doc.contactNumber || '',
+        contactNumber: doc.contactNumber || '',
+        address: 'Iligan City',
+        reason_for_adoption: doc.message || '',
+        has_other_pets: false,
+        status: String(doc.status || 'PENDING').toUpperCase() as any,
+        applied_at: doc.submittedAt || doc.$createdAt,
+      };
+    });
   },
 };
